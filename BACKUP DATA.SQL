@@ -1303,3 +1303,19 @@ CREATE TRIGGER before_order_insert_update
 BEFORE INSERT OR UPDATE OF orderType ON Order1
 FOR EACH ROW
 EXECUTE FUNCTION set_shipping_fee();
+
+
+CREATE ROLE admin_role;
+CREATE ROLE manager_role;
+CREATE ROLE cashier_role;
+CREATE ROLE cook_role;
+CREATE ROLE waiter_role;
+CREATE ROLE delivery_role;
+CREATE ROLE customer_role;
+
+
+
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_role;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_role;
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO admin_role;
+GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA public TO admin_role;
