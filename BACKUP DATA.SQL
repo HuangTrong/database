@@ -1319,3 +1319,25 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO admin_role;
 GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA public TO admin_role;
+
+
+CREATE USER restaurant_admin WITH PASSWORD 'admin_secure_password';
+GRANT admin_role TO restaurant_admin;
+
+CREATE USER restaurant_manager WITH PASSWORD 'manager_secure_password';
+GRANT manager_role TO restaurant_manager;
+
+CREATE USER restaurant_cashier WITH PASSWORD 'cashier_secure_password';
+GRANT cashier_role TO restaurant_cashier;
+
+CREATE USER restaurant_cook WITH PASSWORD 'cook_secure_password';
+GRANT cook_role TO restaurant_cook;
+
+CREATE USER restaurant_waiter WITH PASSWORD 'waiter_secure_password';
+GRANT waiter_role TO restaurant_waiter;
+
+CREATE USER restaurant_delivery WITH PASSWORD 'delivery_secure_password';
+GRANT delivery_role TO restaurant_delivery;
+
+CREATE USER restaurant_customer WITH PASSWORD 'customer_secure_password';
+GRANT customer_role TO restaurant_customer;
