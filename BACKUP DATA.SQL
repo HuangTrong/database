@@ -1321,23 +1321,30 @@ GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO admin_role;
 GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA public TO admin_role;
 
 
+-- Tạo người dùng admin và gắn role
 CREATE USER restaurant_admin WITH PASSWORD 'admin_secure_password';
 GRANT admin_role TO restaurant_admin;
 
+--Tạo người dùng manager và gắn role
 CREATE USER restaurant_manager WITH PASSWORD 'manager_secure_password';
 GRANT manager_role TO restaurant_manager;
 
+--Tạo người dùng cashier và gắn role
 CREATE USER restaurant_cashier WITH PASSWORD 'cashier_secure_password';
 GRANT cashier_role TO restaurant_cashier;
 
+--Tạo người dùng cook và gắn role
 CREATE USER restaurant_cook WITH PASSWORD 'cook_secure_password';
 GRANT cook_role TO restaurant_cook;
 
+--Tạo người dùng waiter và gắn role
 CREATE USER restaurant_waiter WITH PASSWORD 'waiter_secure_password';
 GRANT waiter_role TO restaurant_waiter;
 
+--Tạo người dùng delivery và gắn role
 CREATE USER restaurant_delivery WITH PASSWORD 'delivery_secure_password';
 GRANT delivery_role TO restaurant_delivery;
 
+--Tạo người dùng customer và gắn role
 CREATE USER restaurant_customer WITH PASSWORD 'customer_secure_password';
 GRANT customer_role TO restaurant_customer;
