@@ -1245,7 +1245,7 @@ EXECUTE FUNCTION menu_item_delete_cascade();
 
 
 
--5. Tạo trigger Kiểm tra quyền hạn phụ trách của nhân viên (employee) (INSERT, UPDATE)
+--5. Tạo trigger Kiểm tra quyền hạn phụ trách của nhân viên (employee) (INSERT, UPDATE)
 CREATE OR REPLACE FUNCTION check_employee_permissions()
 RETURNS TRIGGER AS $$
 BEGIN
