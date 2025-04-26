@@ -310,7 +310,7 @@ CREATE TABLE Token (
 CREATE TABLE Reservation (
 	id UUID PRIMARY KEY,
 	userId UUID,
-	tableId UUID,
+	orderId UUID,
 	reservationTime TIMESTAMP NOT NULL,
 	status ReservationStatus,
 	isDeleted BOOLEAN DEFAULT FALSE
@@ -451,6 +451,7 @@ fk_poolId_C FOREIGN KEY (poolId) REFERENCES CouponPool(id) ON DELETE CASCADE;
 ---
 ALTER TABLE CouponTarget ADD CONSTRAINT 
 fk_couponId_CT FOREIGN KEY (couponId) REFERENCES Coupon(id) ON DELETE CASCADE;
+
 ALTER TABLE CouponTarget ADD CONSTRAINT 
 fk_userId_CT FOREIGN KEY (userId) REFERENCES User1(id) ON DELETE CASCADE;
 ---
@@ -459,34 +460,43 @@ fk_couponId_CU FOREIGN KEY (couponId) REFERENCES Coupon(id) ON DELETE CASCADE;
 
 ALTER TABLE CouponUsage ADD CONSTRAINT 
 fk_userId_CU FOREIGN KEY (UserId) REFERENCES User1(id) ON DELETE CASCADE;
+
 ---
 ALTER TABLE Employee ADD CONSTRAINT 
 fk_userId_E FOREIGN KEY (userId) REFERENCES User1(id) ON DELETE CASCADE;
 
+
 --- Khoá ngoại bảng LeaveRequest tới bảng Employee
 ALTER TABLE LeaveRequest ADD CONSTRAINT 
 fk_employeeId_LR FOREIGN KEY (employeeId) REFERENCES Employee(id) ON DELETE CASCADE;
+
 --- Khoá ngoại bảng Attendance tới bảng Employee
 ALTER TABLE Attendance ADD CONSTRAINT 
 fk_employeeId_A FOREIGN KEY (employeeId) REFERENCES Employee(id) ON DELETE CASCADE;
+
 --- Khoá ngoại bảng OvertimeRequest tới bảng Employee
 ALTER TABLE OvertimeRequest ADD CONSTRAINT 
 fk_employeeId_OR FOREIGN KEY (employeeId) REFERENCES Employee(id) ON DELETE CASCADE;
+
 --- Khoá ngoại bảng Payroll tới bảng Employee
 ALTER TABLE Payroll ADD CONSTRAINT 
 fk_employeeId_P FOREIGN KEY (employeeId) REFERENCES Employee(id) ON DELETE CASCADE;
+
 --- Khoá ngoại bảng WorkSchedule tới bảng Employee
 ALTER TABLE WorkSchedule ADD CONSTRAINT 
 fk_employeeId_WS FOREIGN KEY (employeeId) REFERENCES Employee(id) ON DELETE CASCADE;
+
 --- Khoá ngoại bảng WorkSchedule tới bảng ShiftTemplate
 ALTER TABLE WorkSchedule ADD CONSTRAINT 
 fk_shiftTemplateId_WS FOREIGN KEY (shiftTemplateId) REFERENCES ShiftTemplate(id) ON DELETE CASCADE;
+
 --- Khoá ngoại bảng Token tới bảng User1
 ALTER TABLE Token ADD CONSTRAINT 
 fk_userId_T FOREIGN KEY (userId) REFERENCES User1(id) ON DELETE CASCADE;
----Khoá ngoại bảng Reservation tới bảng Table1
+
+---Khoá ngoại bảng Reservation tới bảng Order1
 ALTER TABLE Reservation ADD CONSTRAINT 
-fk_tableId_Res FOREIGN KEY (orderId) REFERENCES Table1 (id) ON DELETE CASCADE;
+fk_orderId_Res FOREIGN KEY (orderId) REFERENCES Order1 (id) ON DELETE CASCADE;
 
 ALTER TABLE Reservation ADD CONSTRAINT 
 fk_userId_Res FOREIGN KEY (userId) REFERENCES User1(id) ON DELETE CASCADE;
@@ -940,14 +950,14 @@ $$;
 CREATE OR REPLACE PROCEDURE add_reservation(
   p_id UUID,
   p_userId UUID,
-  p_tableId UUID,
+  p_orderId UUID,
   p_reservationTime TIMESTAMP,
   p_status ReservationStatus,
 )
 LANGUAGE SQL
 AS $$
-INSERT INTO Reservation (id, userId, tableId, reservationTime, status)
-VALUES (p_id, p_userId, p_tableId, p_reservationTime, p_status);
+INSERT INTO Reservation (id, userId, orderId, reservationTime, status)
+VALUES (p_id, p_userId, p_orderId, p_reservationTime, p_status);
 $$;
 
 
@@ -1305,46 +1315,119 @@ FOR EACH ROW
 EXECUTE FUNCTION set_shipping_fee();
 
 
+--- Tạo role cho Admin
 CREATE ROLE admin_role;
+
+--- Tạo role cho quản lý
 CREATE ROLE manager_role;
-CREATE ROLE cashier_role;
-CREATE ROLE cook_role;
-CREATE ROLE waiter_role;
-CREATE ROLE delivery_role;
+
+--- Tạo role cho nhân viên
+CREATE ROLE employee_role;
+
+--- Tạo role cho khách hàng
 CREATE ROLE customer_role;
 
 
+--- Tạo người dùng Admin và gán role
+CREATE USER restaurant_admin WITH PASSWORD 'admin_secure_password';
+GRANT admin_role TO restaurant_admin;
+ALTER USER restaurant_admin SET ROLE admin_role;
 
+--- Tạo người dùng Manager và gán role
+CREATE USER restaurant_manager WITH PASSWORD 'manager_secure_password';
+GRANT manager_role TO restaurant_manager;
+ALTER USER restaurant_manager SET ROLE manager_role;
+
+--- Tạo người dùng Employee và gán role
+create user restaurant_employee with password 'employee_secure_password';
+grant employee_role to restaurant_employee;
+ALTER USER restaurant_employee SET ROLE employee_role;
+
+--- Tạo người dùng Customer và gán role
+create user restaurant_customer with password 'customer_password';
+grant customer_role to restaurant_customer;
+ALTER USER restaurant_customer SET ROLE customer_role;
+
+
+--- Phân tất cả các quyền về Bảng, functions, procedures cho Admin_role
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO admin_role;
 GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA public TO admin_role;
 
 
--- Tạo người dùng admin và gắn role
-CREATE USER restaurant_admin WITH PASSWORD 'admin_secure_password';
-GRANT admin_role TO restaurant_admin;
 
---Tạo người dùng manager và gắn role
-CREATE USER restaurant_manager WITH PASSWORD 'manager_secure_password';
-GRANT manager_role TO restaurant_manager;
+--- Phân quyền về bảng của Manager_role
+GRANT USAGE ON SCHEMA public TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Employee TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON WorkSchedule TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON LeaveRequest TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Attendance TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON Payroll TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ShiftTemplate TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OvertimeRequest TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Order1 TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON Payment TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON Coupon TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON Campaign TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON CouponPool TO manager_role;
+GRANT SELECT, INSERT ON CouponTarget TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON CouponUsage TO manager_role;
+GRANT SELECT ON Token TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Reservation TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Review TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Table1 TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Delivery TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OrderItem TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON MenuItem TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON MenuCategory TO manager_role;
+GRANT SELECT ON RecipeIngredient TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryItem TO manager_role;
+GRANT SELECT, INSERT, UPDATE ON Supplier TO manager_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryTransaction TO manager_role;
 
---Tạo người dùng cashier và gắn role
-CREATE USER restaurant_cashier WITH PASSWORD 'cashier_secure_password';
-GRANT cashier_role TO restaurant_cashier;
 
---Tạo người dùng cook và gắn role
-CREATE USER restaurant_cook WITH PASSWORD 'cook_secure_password';
-GRANT cook_role TO restaurant_cook;
 
---Tạo người dùng waiter và gắn role
-CREATE USER restaurant_waiter WITH PASSWORD 'waiter_secure_password';
-GRANT waiter_role TO restaurant_waiter;
+--- Phân quyền về bảng của Employee_role
+GRANT SELECT, UPDATE ON User1 TO employee_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON LeaveRequest TO employee_role;
+GRANT SELECT ON Attendance TO employee_role;
+GRANT SELECT, UPDATE ON ShiftTemplate TO employee_role;
+GRANT SELECT ON WorkSchedule TO employee_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OvertimeRequest TO employee_role;
+GRANT SELECT, INSERT, UPDATE ON Reservation TO employee_role;
+GRANT SELECT ON Review TO employee_role;
+GRANT SELECT, UPDATE ON Table1 TO employee_role;
+GRANT SELECT, INSERT, UPDATE ON Delivery TO employee_role;
+GRANT SELECT, INSERT, UPDATE ON Order1 TO employee_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OrderItem TO employee_role;
+GRANT SELECT ON MenuItem TO employee_role;
+GRANT SELECT ON MenuCategory TO employee_role;
+GRANT SELECT ON RecipeIngredient TO employee_role;
+GRANT SELECT, UPDATE ON InventoryItem TO employee_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryTransaction TO employee_role;
+GRANT SELECT ON Supplier TO employee_role;
+GRANT SELECT ON Payment TO employee_role;
+GRANT SELECT ON CouponPool TO employee_role;
+GRANT SELECT ON Campaign TO employee_role;
+GRANT SELECT ON Coupon TO employee_role;
+GRANT SELECT ON CouponUsage TO employee_role;
 
---Tạo người dùng delivery và gắn role
-CREATE USER restaurant_delivery WITH PASSWORD 'delivery_secure_password';
-GRANT delivery_role TO restaurant_delivery;
 
---Tạo người dùng customer và gắn role
-CREATE USER restaurant_customer WITH PASSWORD 'customer_secure_password';
-GRANT customer_role TO restaurant_customer;
+
+
+--- Phân quyền về bảng của Customer_role
+GRANT SELECT, UPDATE ON User1 TO customer_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Reservation TO customer_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Review TO customer_role;
+GRANT SELECT ON Table1 TO customer_role;
+GRANT SELECT ON Delivery TO customer_role;
+GRANT SELECT, INSERT, DELETE ON OrderItem TO customer_role;
+GRANT SELECT ON MenuItem TO customer_role;
+GRANT SELECT ON MenuCategory TO customer_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON Order1 TO customer_role;
+GRANT SELECT ON Payment TO customer_role;
+GRANT SELECT ON Coupon TO customer_role;
+GRANT SELECT ON Campaign TO customer_role;
+GRANT SELECT ON CouponUsage TO customer_role;
+
