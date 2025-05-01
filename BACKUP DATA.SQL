@@ -549,7 +549,70 @@ fk_inventoryItemId_IT FOREIGN KEY (inventoryItemId) REFERENCES InventoryItem(id)
 
 
 --STORE PROCEDURE
---1. In ra danh sách User (User)
+--- 1. Thêm User
+CREATE OR REPLACE PROCEDURE add_user(
+    p_name VARCHAR(100),
+    p_password VARCHAR(128),
+    p_email VARCHAR(50),
+    p_phone VARCHAR(15),
+    p_address VARCHAR(255)
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_id UUID;
+BEGIN
+    -- Generate new UUID
+    SELECT gen_random_uuid() INTO new_id;
+    
+    -- Insert new user
+    INSERT INTO User1 (
+        id, name, password, email, phone, address, 
+        isAdmin, isEmployee, isActive, createdAt, 
+        userTier, point, isDeleted
+    )
+    VALUES (
+        new_id, p_name, p_password, p_email, p_phone, p_address,
+        FALSE, FALSE, TRUE, CURRENT_TIMESTAMP,
+        'BRONZE', 0, FALSE
+    );
+    
+    RAISE NOTICE 'User created with ID: %', new_id;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Email or phone number already exists';
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error creating user: %', SQLERRM;
+END;
+$$;
+
+--- 2. Thêm Employee
+CREATE OR REPLACE PROCEDURE add_employee(
+  p_userId UUID,
+  p_role Role,
+  p_employmentType EmploymentType,
+  p_employmentStatus EmploymentStatus
+)
+LANGUAGE SQL
+AS $$
+DECLARE
+    new_em_id UUID;
+BEGIN
+    -- Generate new UUID
+    SELECT gen_random_uuid() INTO new_em_id;
+    INSERT INTO Employee (id, userId, salary, hourlyRate, hireDate, role, employmentType, employmentStatus, isDeleted)
+    VALUES (new_em_id, p_userId, 0, 0, CURRENT_TIMESTAMP, p_role, p_employmentType, p_employmentStatus, FALSE);
+
+    RAISE NOTICE 'Employee created with ID: %', new_em_id;
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Employee ID already exists';
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error creating employee: %', SQLERRM;
+END;
+$$;
+
+---3. In ra danh sách khách hàng (User)
 CREATE OR REPLACE FUNCTION get_customers()
 RETURNS TABLE (
     Id UUID,
@@ -578,8 +641,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
---2. In ra danh sách nhân viên (Employee)
-CREATE OR REPLACE FUNCTION get_all_employees()
+---4. In ra danh sách nhân viên theo từng loại nhân viên (Employee) (Employee.role)
+CREATE OR REPLACE FUNCTION get_employees_by_role(role_filter Role DEFAULT NULL)
 RETURNS TABLE (
     employee_id UUID,
     name VARCHAR(100),
@@ -611,13 +674,604 @@ BEGIN
         User1 u ON e.userId = u.id
     WHERE 
         e.isDeleted = FALSE
+        AND (role_filter IS NULL OR e.role = role_filter)
     ORDER BY 
+        e.role,
         u.name;
 END;
 $$ LANGUAGE plpgsql;
 
+---5. Cập nhật thông tin người dùng
+CREATE OR REPLACE FUNCTION UpdateUserInfo(
+    p_updatingUserId UUID,     -- Người đang thực hiện việc cập nhật
+    p_targetUserId UUID,       -- Người bị cập nhật thông tin
+    p_name VARCHAR(100),
+    p_email VARCHAR(50),
+    p_phone VARCHAR(15),
+    p_address VARCHAR(255),
+    p_isAdmin BOOLEAN,
+    p_isEmployee BOOLEAN,
+    p_isActive BOOLEAN,
+    p_userTier UserTier,
+    p_point INT
+)
+RETURNS VOID AS $$
+DECLARE
+    updatingUserIsAdmin BOOLEAN;
+BEGIN
+    -- Kiểm tra xem người cập nhật có phải là admin không
+    SELECT isAdmin INTO updatingUserIsAdmin FROM User1 WHERE id = p_updatingUserId;
 
---3. In ra danh sách hoá đơn (Order) của 1 khách hàng (User.ID)
+    IF updatingUserIsAdmin THEN
+        -- Admin có thể cập nhật tất cả các trường
+        UPDATE User1
+        SET
+            name = p_name,
+            email = p_email,
+            phone = p_phone,
+            address = p_address,
+            isAdmin = p_isAdmin,
+            isEmployee = p_isEmployee,
+            isActive = p_isActive,
+            userTier = p_userTier,
+            updatedAt = NOW(),
+			point = p_point
+        WHERE id = p_targetUserId AND isDeleted = FALSE;
+    ELSE
+        -- Người dùng thường chỉ cập nhật thông tin cá nhân của chính mình
+        UPDATE User1
+        SET
+            name = p_name,
+            email = p_email,
+            phone = p_phone,
+            address = p_address,
+            updatedAt = NOW()
+        WHERE id = p_targetUserId AND id = p_updatingUserId AND isDeleted = FALSE;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+---6. danh sách lịch làm việc của 1 nhân viên theo employeeId
+CREATE OR REPLACE FUNCTION GetWorkScheduleByEmployeeId(p_employeeId UUID)
+RETURNS TABLE (
+    ScheduleId UUID,
+    WorkDate TIMESTAMP,
+    ShiftTemplateName VARCHAR(50),
+    ShiftType VARCHAR(50),
+    StartTime VARCHAR(15),
+    EndTime VARCHAR(15),
+    ShiftStart TIMESTAMP,
+    ShiftEnd TIMESTAMP,
+    CreatedAt TIMESTAMP
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        ws.id AS ScheduleId,
+        ws.date AS WorkDate,
+        st.name AS ShiftTemplateName,
+        st.shiftType AS ShiftType,
+        st.startTime AS StartTime,
+        st.endTime AS EndTime,
+        ws.shiftStart AS ShiftStart,
+        ws.shiftEnd AS ShiftEnd,
+        ws.createdAt AS CreatedAt
+    FROM WorkSchedule ws
+    JOIN ShiftTemplate st ON ws.shiftTemplateId = st.id
+    WHERE ws.employeeId = p_employeeId
+      AND ws.isDeleted = FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+--- 7. Quy trình yêu cầu nghỉ phép
+CREATE OR REPLACE PROCEDURE process_leave_request(
+    p_leave_request_id UUID,
+    p_status LeaveStatus
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_employee_id UUID;
+    v_start_date TIMESTAMP;
+    v_end_date TIMESTAMP;
+BEGIN
+    -- Get leave request details
+    SELECT employeeId, startDate, endDate
+    INTO v_employee_id, v_start_date, v_end_date
+    FROM LeaveRequest
+    WHERE id = p_leave_request_id;
+    
+    IF v_employee_id IS NULL THEN
+        RAISE EXCEPTION 'Leave request not found';
+    END IF;
+    
+    -- Update leave request status
+    UPDATE LeaveRequest
+    SET status = p_status,
+        updatedAt = CURRENT_TIMESTAMP
+    WHERE id = p_leave_request_id;
+    
+    -- If approved, update employee status and remove from work schedule
+    IF p_status = 'APPROVED' THEN
+        -- Update employee status to ON_LEAVE
+        UPDATE Employee
+        SET employmentStatus = 'ON_LEAVE'
+        WHERE id = v_employee_id;
+        
+        -- Mark scheduling conflicts as deleted
+        UPDATE WorkSchedule
+        SET isDeleted = TRUE
+        WHERE employeeId = v_employee_id
+          AND date >= v_start_date::DATE
+          AND date <= v_end_date::DATE;
+          
+        RAISE NOTICE 'Leave approved for employee % from % to %',
+                     v_employee_id, v_start_date, v_end_date;
+    ELSE
+        RAISE NOTICE 'Leave request % %', p_leave_request_id, p_status;
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error processing leave request: %', SQLERRM;
+END;
+$$;
+
+--- 8. Tạo chấm công nhân viên
+CREATE OR REPLACE PROCEDURE record_employee_attendance(
+    p_employee_id UUID,
+    p_check_in TIMESTAMP,
+    p_check_out TIMESTAMP,
+    p_notes VARCHAR(255) DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_scheduled_shift_start TIMESTAMP;
+    v_scheduled_shift_end TIMESTAMP;
+    v_work_date DATE := p_check_in::DATE;
+    v_late_minutes INT := 0;
+    v_early_departure_minutes INT := 0;
+    v_overtime_minutes INT := 0;
+BEGIN
+    -- Get scheduled shift times
+    SELECT shiftStart, shiftEnd
+    INTO v_scheduled_shift_start, v_scheduled_shift_end
+    FROM WorkSchedule
+    WHERE employeeId = p_employee_id
+      AND date = v_work_date;
+      
+    -- Calculate late minutes
+    IF p_check_in > v_scheduled_shift_start THEN
+        v_late_minutes := EXTRACT(EPOCH FROM (p_check_in - v_scheduled_shift_start)) / 60;
+    END IF;
+    
+    -- Calculate early departure
+    IF p_check_out < v_scheduled_shift_end THEN
+        v_early_departure_minutes := EXTRACT(EPOCH FROM (v_scheduled_shift_end - p_check_out)) / 60;
+    END IF;
+    
+    -- Calculate overtime
+    IF p_check_out > v_scheduled_shift_end THEN
+        v_overtime_minutes := EXTRACT(EPOCH FROM (p_check_out - v_scheduled_shift_end)) / 60;
+    END IF;
+    
+    -- Record attendance
+    INSERT INTO Attendance (
+        id, employeeId, workDate, checkIn, checkOut, notes,
+        overtimeMinutes, lateMinutes, earlyDepartureMinutes,
+        createdAt, isDeleted
+    )
+    VALUES (
+        gen_random_uuid(), p_employee_id, v_work_date, p_check_in, p_check_out, p_notes,
+        v_overtime_minutes, v_late_minutes, v_early_departure_minutes,
+        CURRENT_TIMESTAMP, FALSE
+    );
+    
+    RAISE NOTICE 'Attendance recorded for employee % on %', p_employee_id, v_work_date;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error recording attendance: %', SQLERRM;
+END;
+$$;
+
+---9.  Xem thông tin chấm công
+CREATE OR REPLACE FUNCTION GetAttendanceByEmployee(
+    p_employeeId UUID,
+    p_startDate TIMESTAMP DEFAULT NULL,
+    p_endDate TIMESTAMP DEFAULT NULL
+)
+RETURNS TABLE (
+    AttendanceId UUID,
+    WorkDate DATE,
+    CheckIn TIMESTAMP,
+    CheckOut TIMESTAMP,
+    Notes VARCHAR(255),
+    OvertimeMinutes INT,
+    LateMinutes INT,
+    EarlyDepartureMinutes INT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        a.id::UUID AS AttendanceId,
+        a.workDate::DATE AS WorkDate,
+        a.checkIn::TIMESTAMP AS CheckIn,
+        a.checkOut::TIMESTAMP AS CheckOut,
+        a.notes::VARCHAR(255) AS Notes,
+        a.overtimeMinutes::INT AS OvertimeMinutes,
+        a.lateMinutes::INT AS LateMinutes,
+        a.earlyDepartureMinutes::INT AS EarlyDepartureMinutes
+    FROM Attendance a
+    WHERE 
+        a.employeeId = p_employeeId
+        AND a.isDeleted = FALSE
+        AND (p_startDate IS NULL OR a.workDate >= p_startDate)
+        AND (p_endDate IS NULL OR a.workDate <= p_endDate)
+    ORDER BY a.workDate DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+---10. Tạo và chỉ định lịch làm việc cho nhân viên
+CREATE OR REPLACE PROCEDURE create_employee_schedule(
+    p_employee_id UUID,
+    p_start_date DATE,
+    p_end_date DATE,
+    p_shift_template_id UUID
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_current_date DATE := p_start_date;
+    v_shift_start VARCHAR(15);
+    v_shift_end VARCHAR(15);
+BEGIN
+    -- Get shift template details
+    SELECT startTime, endTime 
+    INTO v_shift_start, v_shift_end
+    FROM ShiftTemplate 
+    WHERE id = p_shift_template_id;
+    
+    IF v_shift_start IS NULL THEN
+        RAISE EXCEPTION 'Shift template not found';
+    END IF;
+    
+    -- Loop through each day in the date range
+    WHILE v_current_date <= p_end_date LOOP
+        -- Create schedule entry
+        INSERT INTO WorkSchedule (
+            id, employeeId, date, shiftTemplateId, 
+            shiftStart, shiftEnd, createdAt, isDeleted
+        )
+        VALUES (
+            gen_random_uuid(), p_employee_id, v_current_date, p_shift_template_id,
+            v_current_date + v_shift_start::TIME, v_current_date + v_shift_end::TIME, 
+            CURRENT_TIMESTAMP, FALSE
+        );
+        
+        -- Move to next day
+        v_current_date := v_current_date + INTERVAL '1 day';
+    END LOOP;
+    
+    RAISE NOTICE 'Schedule created for employee % from % to %', 
+                 p_employee_id, p_start_date, p_end_date;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error creating schedule: %', SQLERRM;
+END;
+$$;
+
+--- 11. Tạo bảng lương hàng tháng
+CREATE OR REPLACE PROCEDURE generate_payroll(
+    p_month INT,
+    p_year INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r_employee RECORD;
+    v_start_date DATE;
+    v_end_date DATE;
+    v_worked_hours DECIMAL(10,2);
+    v_standard_hours INT;
+    v_overtime_hours DECIMAL(10,2);
+    v_overtime_pay DECIMAL(12,2);
+    v_net_salary DECIMAL(12,2);
+BEGIN
+    -- Set date range for the month
+    v_start_date := make_date(p_year, p_month, 1);
+    v_end_date := (v_start_date + INTERVAL '1 month') - INTERVAL '1 day';
+    
+    -- Process for each active employee
+    FOR r_employee IN (
+        SELECT e.id, e.salary, e.hourlyRate
+        FROM Employee e
+        WHERE e.employmentStatus = 'ACTIVE'
+    )
+    LOOP
+        -- Calculate worked hours from attendance records
+        SELECT COALESCE(SUM(
+            EXTRACT(EPOCH FROM (checkOut - checkIn)) / 3600
+        ), 0) INTO v_worked_hours
+        FROM Attendance
+        WHERE employeeId = r_employee.id
+          AND workDate BETWEEN v_start_date AND v_end_date;
+        
+        -- Standard hours (assumes 8 hours/day, 22 working days)
+        v_standard_hours := 8 * 22;
+        
+        -- Calculate overtime
+        IF v_worked_hours > v_standard_hours THEN
+            v_overtime_hours := v_worked_hours - v_standard_hours;
+        ELSE
+            v_overtime_hours := 0;
+        END IF;
+        
+        -- Calculate overtime pay (1.5x hourly rate)
+        v_overtime_pay := v_overtime_hours * r_employee.hourlyRate * 1.5;
+        
+        -- Calculate net salary (base salary + overtime)
+        IF r_employee.salary IS NOT NULL THEN
+            -- Salaried employee
+            v_net_salary := r_employee.salary + v_overtime_pay;
+        ELSE
+            -- Hourly employee
+            v_net_salary := (v_worked_hours - v_overtime_hours) * r_employee.hourlyRate + v_overtime_pay;
+        END IF;
+        
+        -- Create payroll record
+        INSERT INTO Payroll (
+            id, employeeId, baseSalary, hourlyRate, workedHours,
+            standardHours, overtimePay, deductions, netSalary, createdAt
+        )
+        VALUES (
+            gen_random_uuid(), r_employee.id, r_employee.salary, r_employee.hourlyRate, 
+            v_worked_hours, v_standard_hours, v_overtime_pay, 0, v_net_salary, CURRENT_TIMESTAMP
+        );
+        
+    END LOOP;
+    
+    RAISE NOTICE 'Payroll generated for % %', p_month, p_year;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error generating payroll: %', SQLERRM;
+END;
+$$;
+
+
+
+
+
+--12. Thêm Reservation
+CREATE OR REPLACE PROCEDURE add_reservation(
+    p_user_id UUID,
+    p_reservation_time TIMESTAMP,
+    p_table_id UUID,
+    p_party_size INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_reservation_id UUID;
+    v_table_capacity INT;
+BEGIN
+    -- Check table capacity
+    SELECT capacity INTO v_table_capacity
+    FROM Table1 
+    WHERE id = p_table_id AND status = 'AVAILABLE';
+    
+    IF v_table_capacity IS NULL THEN
+        RAISE EXCEPTION 'Table not found or not available';
+    END IF;
+    
+    IF v_table_capacity < p_party_size THEN
+        RAISE EXCEPTION 'Table capacity (%) is less than party size (%)', 
+                        v_table_capacity, p_party_size;
+    END IF;
+    
+    -- Generate new UUID
+    SELECT gen_random_uuid() INTO new_reservation_id;
+    
+    -- Create the reservation
+    INSERT INTO Reservation (
+        id, userId, orderId, reservationTime, status, isDeleted
+    )
+    VALUES (
+        new_reservation_id, p_user_id, NULL, p_reservation_time, 'CONFIRMED', FALSE
+    );
+    
+    -- Update table status
+    UPDATE Table1
+    SET status = 'RESERVED'
+    WHERE id = p_table_id;
+    
+    RAISE NOTICE 'Reservation created with ID: % for table % at %', 
+                 new_reservation_id, p_table_id, p_reservation_time;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error creating reservation: %', SQLERRM;
+END;
+$$;
+
+
+---13. Xem thông tin đặt bàn của khách hàng
+CREATE OR REPLACE FUNCTION GetReservationsByUserId(p_userId UUID)
+RETURNS TABLE (
+    ReservationId UUID,
+    ReservationTime TIMESTAMP,
+    TableName VARCHAR(10),
+    TableCapacity INT,
+    Status ReservationStatus,
+    CreatedAt TIMESTAMP
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        r.id AS ReservationId,
+        r.reservationTime AS ReservationTime,
+        t.number AS TableName,
+        t.capacity AS TableCapacity,
+        r.status AS Status,
+        r.createdAt AS CreatedAt
+    FROM Reservation r
+    JOIN User1 u ON r.userId = u.id
+    JOIN Table1 t ON TRUE
+    LEFT JOIN Order1 o ON r.orderId = o.id
+    WHERE r.userId = p_userId AND r.isDeleted = FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+
+--- 14. Thêm Order
+CREATE OR REPLACE PROCEDURE add_order(
+    p_user_id UUID,
+    p_table_id UUID,
+    p_order_type OrderType,
+    p_coupon_id UUID DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_order_id UUID;
+    v_total_amount DECIMAL(12,2) := 0;
+    v_shipping_fee DECIMAL(12,2) := 0;
+    v_tax_rate DECIMAL(5,2) := 0.1; -- 10% tax
+    v_tax_amount DECIMAL(12,2) := 0;
+    v_points_earned INT := 0;
+    v_user_tier UserTier;
+BEGIN
+    -- Generate new UUID
+    SELECT gen_random_uuid() INTO new_order_id;
+    
+    -- Get user tier for points calculation
+    SELECT userTier INTO v_user_tier FROM User1 WHERE id = p_user_id;
+    
+    -- Set shipping fee based on order type
+    IF p_order_type = 'DELIVERY' THEN
+        v_shipping_fee := 5.00; -- Example shipping fee
+    ELSE
+        v_shipping_fee := 0;
+    END IF;
+    
+    -- Calculate tax (will be updated later when order items are added)
+    v_tax_amount := v_total_amount * v_tax_rate;
+    
+    -- Calculate points based on tier
+    CASE v_user_tier
+        WHEN 'BRONZE' THEN v_points_earned := 1;
+        WHEN 'SILVER' THEN v_points_earned := 2;
+        WHEN 'GOLD' THEN v_points_earned := 3;
+    END CASE;
+    
+    -- Create the order
+    INSERT INTO Order1 (
+        id, userId, tableId, orderType, orderDate,
+        totalAmount, shippingFee, taxAmount, status,
+        couponId, earnedPoint, isDeleted
+    )
+    VALUES (
+        new_order_id, p_user_id, p_table_id, p_order_type, CURRENT_TIMESTAMP,
+        v_total_amount, v_shipping_fee, v_tax_amount, 'PENDING',
+        p_coupon_id, v_points_earned, FALSE
+    );
+    
+    -- Update table status if it's a dine-in order
+    IF p_order_type = 'DINE_IN' AND p_table_id IS NOT NULL THEN
+        UPDATE Table1 SET status = 'OCCUPIED' WHERE id = p_table_id;
+    END IF;
+    
+    RAISE NOTICE 'Order created with ID: %', new_order_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error creating order: %', SQLERRM;
+END;
+$$;
+
+-- 15. Thêm OrderItem
+CREATE OR REPLACE PROCEDURE add_order_item(
+    p_order_id UUID,
+    p_menu_item_id UUID,
+    p_quantity INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_item_id UUID;
+    v_price DECIMAL(12,2);
+    v_item_total DECIMAL(12,2);
+    v_order_total DECIMAL(12,2);
+    v_tax_rate DECIMAL(5,2) := 0.1; -- 10% tax
+    v_order_type OrderType;
+    v_coupon_id UUID;
+    v_discount_type DiscountType;
+    v_discount_value DECIMAL(12,2);
+    v_min_order_value DECIMAL(12,2);
+    v_max_discount_value DECIMAL(12,2);
+    v_discount_amount DECIMAL(12,2) := 0;
+    v_final_total DECIMAL(12,2);
+BEGIN
+    -- Check if menu item exists and get price
+    SELECT price INTO v_price FROM MenuItem WHERE id = p_menu_item_id AND isAvailable = TRUE;
+    IF v_price IS NULL THEN
+        RAISE EXCEPTION 'Menu item not found or unavailable';
+    END IF;
+    
+    -- Generate new UUID for order item
+    SELECT gen_random_uuid() INTO new_item_id;
+    
+    -- Calculate item total
+    v_item_total := v_price * p_quantity;
+    
+    -- Insert order item
+    INSERT INTO OrderItem (id, orderId, menuItemId, quantity, price)
+    VALUES (new_item_id, p_order_id, p_menu_item_id, p_quantity, v_price);
+    
+    -- Update order total and tax
+    SELECT SUM(quantity * price) INTO v_order_total FROM OrderItem WHERE orderId = p_order_id;
+    
+    -- Get coupon information
+    SELECT o.orderType, o.couponId 
+    INTO v_order_type, v_coupon_id 
+    FROM Order1 o WHERE o.id = p_order_id;
+    
+    -- Apply coupon discount if available
+    IF v_coupon_id IS NOT NULL THEN
+        SELECT c.discountType, c.discountValue, c.minOrderValue, c.maxDiscountValue
+        INTO v_discount_type, v_discount_value, v_min_order_value, v_max_discount_value
+        FROM Coupon c WHERE c.id = v_coupon_id AND c.status = 'AVAILABLE';
+        
+        IF v_order_total >= v_min_order_value THEN
+            IF v_discount_type = 'PERCENTAGE' THEN
+                v_discount_amount := v_order_total * (v_discount_value / 100);
+                -- Ensure discount doesn't exceed max value
+                IF v_discount_amount > v_max_discount_value THEN
+                    v_discount_amount := v_max_discount_value;
+                END IF;
+            ELSE -- FIXED_AMOUNT
+                v_discount_amount := v_discount_value;
+            END IF;
+        END IF;
+    END IF;
+    
+    -- Calculate final total after discount
+    v_final_total := v_order_total - v_discount_amount;
+    
+    -- Update order with new total and tax
+    UPDATE Order1 
+    SET totalAmount = v_final_total,
+        taxAmount = v_final_total * v_tax_rate
+    WHERE id = p_order_id;
+    
+    RAISE NOTICE 'Added item to order. New total: %', v_final_total;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error adding order item: %', SQLERRM;
+END;
+$$;
+
+--16. In ra danh sách hoá đơn (Order) của 1 khách hàng (User.ID)
 CREATE OR REPLACE FUNCTION get_customer_orders(customer_id UUID)
 RETURNS TABLE (
     order_id UUID,
@@ -665,315 +1319,398 @@ END;
 $$ LANGUAGE plpgsql;
 
 
---4. In ra danh sách nhân viên theo từng loại nhân viên (Employee) (Employee.role)
-CREATE OR REPLACE FUNCTION get_employees_by_role(role_filter Role DEFAULT NULL)
+
+---17. Xử lý thanh toán
+CREATE OR REPLACE PROCEDURE process_payment(
+    p_order_id UUID,
+    p_payment_method PaymentMethod
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_payment_id UUID;
+    v_total_amount DECIMAL(12,2);
+    v_user_id UUID;
+    v_earned_points INT;
+    v_table_id UUID;
+BEGIN
+    -- Get order details
+    SELECT totalAmount, userId, earnedPoint, tableId 
+    INTO v_total_amount, v_user_id, v_earned_points, v_table_id
+    FROM Order1 
+    WHERE id = p_order_id;
+    
+    IF v_total_amount IS NULL THEN
+        RAISE EXCEPTION 'Order not found';
+    END IF;
+    
+    -- Generate new UUID for payment
+    SELECT gen_random_uuid() INTO new_payment_id;
+    
+    -- Create payment record
+    INSERT INTO Payment (id, orderId, paymentDate, amount, method, status)
+    VALUES (new_payment_id, p_order_id, CURRENT_TIMESTAMP, v_total_amount, p_payment_method, 'COMPLETED');
+    
+    -- Update order status
+    UPDATE Order1 SET status = 'SERVED' WHERE id = p_order_id;
+    
+    -- Add points to user
+    UPDATE User1 
+    SET point = point + v_earned_points
+    WHERE id = v_user_id;
+    
+    -- Update user tier based on points
+    UPDATE User1
+    SET userTier = 
+        CASE
+            WHEN point >= 1000 THEN 'GOLD'::UserTier
+            WHEN point >= 500 THEN 'SILVER'::UserTier
+            ELSE 'BRONZE'::UserTier
+        END
+    WHERE id = v_user_id;
+    
+    -- Update table status if dine-in order is complete
+    IF v_table_id IS NOT NULL THEN
+        UPDATE Table1 SET status = 'AVAILABLE' WHERE id = v_table_id;
+    END IF;
+    
+    RAISE NOTICE 'Payment processed successfully for order %', p_order_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error processing payment: %', SQLERRM;
+END;
+$$;
+
+
+
+
+-- 18. Kiểm tra mức tồn kho và tạo đơn đặt hàng mua hàng
+CREATE OR REPLACE PROCEDURE check_inventory_levels()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r_item RECORD;
+    v_low_threshold INT := 20; -- Default low threshold
+BEGIN
+    -- Find low inventory items
+    FOR r_item IN (
+        SELECT i.id, i.name, i.quantity, i.unit, i.supplierId, s.name as supplier_name
+        FROM InventoryItem i
+        JOIN Supplier s ON i.supplierId = s.id
+        WHERE i.quantity <= v_low_threshold
+          AND i.isDeleted = FALSE
+    )
+    LOOP
+        -- Log low inventory alert
+        RAISE NOTICE 'Low inventory: % (% %), Supplier: %', 
+                     r_item.name, r_item.quantity, r_item.unit, r_item.supplier_name;
+                     
+        -- Here you could automatically create purchase orders
+        -- or send notifications to staff
+    END LOOP;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error checking inventory: %', SQLERRM;
+END;
+$$;
+
+
+-- 19. Quản lý hàng tồn kho sau khi đặt hàng
+CREATE OR REPLACE PROCEDURE update_inventory_after_order(
+    p_order_id UUID
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r_item RECORD;
+    r_ingredient RECORD;
+BEGIN
+    -- Loop through each item in the order
+    FOR r_item IN (
+        SELECT oi.menuItemId, oi.quantity
+        FROM OrderItem oi
+        WHERE oi.orderId = p_order_id
+    )
+    LOOP
+        -- Find ingredients for this menu item
+        FOR r_ingredient IN (
+            SELECT ri.inventoryItemId, ri.quantity * r_item.quantity as total_quantity
+            FROM RecipeIngredient ri
+            WHERE ri.menuItemId = r_item.menuItemId
+        )
+        LOOP
+            -- Update inventory quantity
+            UPDATE InventoryItem
+            SET quantity = quantity - r_ingredient.total_quantity,
+                updatedAt = CURRENT_TIMESTAMP
+            WHERE id = r_ingredient.inventoryItemId;
+            
+            -- Record transaction
+            INSERT INTO InventoryTransaction (
+                id, inventoryItemId, transactionType, 
+                quantity, price, timestamp
+            )
+            SELECT 
+                gen_random_uuid(), r_ingredient.inventoryItemId, 'EXPORT'::TransactionType,
+                r_ingredient.total_quantity, ii.price, CURRENT_TIMESTAMP
+            FROM (SELECT r_ingredient.inventoryItemId, 0.00 as price) as ii;
+            
+            -- Check for low inventory
+            PERFORM 1 FROM InventoryItem 
+            WHERE id = r_ingredient.inventoryItemId AND quantity < 10;
+            
+            IF FOUND THEN
+                RAISE NOTICE 'Low inventory alert for item ID: %', r_ingredient.inventoryItemId;
+            END IF;
+        END LOOP;
+    END LOOP;
+    
+    RAISE NOTICE 'Inventory updated for order %', p_order_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error updating inventory: %', SQLERRM;
+END;
+$$;
+
+
+
+
+---20  Xem thông tin vận chuyển đơn hàng
+CREATE OR REPLACE FUNCTION GetDeliveryByTrackingCode(p_Code VARCHAR(15))
 RETURNS TABLE (
-    employee_id UUID,
-    name VARCHAR(100),
-    email VARCHAR(50),
-    phone VARCHAR(15),
-    role Role,
-    employment_type EmploymentType,
-    employment_status EmploymentStatus,
-    hire_date TIMESTAMP,
-    salary DECIMAL(12,2),
-    hourly_rate DECIMAL(12,2)
+    DeliveryId UUID,
+    OrderId UUID,
+    DeliveryDate TIMESTAMP,
+    Status DeliveryStatus,
+    Carrier VARCHAR(50),
+    TrackingCode VARCHAR(15)
 ) AS $$
 BEGIN
     RETURN QUERY
     SELECT 
-        e.id AS employee_id,
-        u.name,
-        u.email,
-        u.phone,
-        e.role,
-        e.employmentType AS employment_type,
-        e.employmentStatus AS employment_status,
-        e.hireDate AS hire_date,
-        e.salary,
-        e.hourlyRate AS hourly_rate
-    FROM 
-        Employee e
-    JOIN 
-        User1 u ON e.userId = u.id
-    WHERE 
-        e.isDeleted = FALSE
-        AND (role_filter IS NULL OR e.role = role_filter)
-    ORDER BY 
-        e.role,
-        u.name;
+        d.id AS DeliveryId,
+        d.orderId AS OrderId,
+        d.deliveryDate AS DeliveryDate,
+        d.status::DeliveryStatus AS Status,
+        d.carrier AS Carrier,
+        d.trackingCode AS TrackingCode
+    FROM Delivery d
+    WHERE d.trackingCode = p_Code;
 END;
 $$ LANGUAGE plpgsql;
 
 
---5. In ra danh sách nhân viên làm việc trong ngày nào đó (Employee + Work schedule) (WorkSchedule.date ~ WorkSchedule)
-CREATE OR REPLACE FUNCTION get_employees_working_on_date(work_date DATE)
+---21. Cập nhật thông tin vận chuyển đơn hàng
+CREATE OR REPLACE FUNCTION UpdateDelivery(
+    p_deliveryId UUID,
+    p_deliveryDate TIMESTAMP DEFAULT NULL,
+    p_status DeliveryStatus DEFAULT NULL,
+    p_carrier VARCHAR(50) DEFAULT NULL,
+    p_trackingCode VARCHAR(15) DEFAULT NULL
+)
+RETURNS VOID AS $$
+BEGIN
+    UPDATE Delivery
+    SET
+        deliveryDate = COALESCE(p_deliveryDate, deliveryDate),
+        status = COALESCE(p_status, status),
+        carrier = COALESCE(p_carrier, carrier),
+        trackingCode = COALESCE(p_trackingCode, trackingCode)
+    WHERE id = p_deliveryId AND isDeleted = FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+-- 22. Tạo chiến dịch phiếu giảm giá
+CREATE OR REPLACE PROCEDURE create_coupon_campaign(
+    p_name VARCHAR(50),
+    p_description VARCHAR(255),
+    p_start_date TIMESTAMP,
+    p_end_date TIMESTAMP,
+    p_target_tier UserTier,
+    p_discount_type DiscountType,
+    p_discount_value DECIMAL(12,2),
+    p_min_order_value DECIMAL(12,2),
+    p_max_discount_value DECIMAL(12,2),
+    p_quantity INT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    new_campaign_id UUID;
+    new_pool_id UUID;
+    i INT;
+    v_coupon_code VARCHAR(30);
+BEGIN
+    -- Generate UUIDs
+    SELECT gen_random_uuid() INTO new_campaign_id;
+    SELECT gen_random_uuid() INTO new_pool_id;
+    
+    -- Create campaign
+    INSERT INTO Campaign (
+        id, name, description, startDate, userTier, endDate, isDeletad
+    )
+    VALUES (
+        new_campaign_id, p_name, p_description, p_start_date, 
+        p_target_tier, p_end_date, FALSE
+    );
+    
+    -- Create coupon pool
+    INSERT INTO CouponPool (
+        id, name, description, totalCoupons, createdAt, 
+        campaignId, allocatedCount, isDeleted
+    )
+    VALUES (
+        new_pool_id, p_name || ' Pool', p_description, p_quantity, 
+        CURRENT_TIMESTAMP, new_campaign_id, 0, FALSE
+    );
+    
+    -- Generate coupons
+    FOR i IN 1..p_quantity LOOP
+        -- Generate unique coupon code (prefix + random)
+        v_coupon_code := LEFT(p_name, 3) || '-' || 
+                         LPAD(i::TEXT, 5, '0') || '-' || 
+                         SUBSTRING(MD5(RANDOM()::TEXT) FROM 1 FOR 5);
+        
+        -- Create coupon
+        INSERT INTO Coupon (
+            id, code, discountType, discountValue, minOrderValue,
+            maxDiscountValue, usageLimit, status, isActive,
+            expiresAt, createdAt, updatedAt, campaignId, poolId, isDeleted
+        )
+        VALUES (
+            gen_random_uuid(), v_coupon_code, p_discount_type, p_discount_value, 
+            p_min_order_value, p_max_discount_value, 1, 'AVAILABLE',
+            TRUE, p_end_date, CURRENT_TIMESTAMP, NULL, 
+            new_campaign_id, new_pool_id, FALSE
+        );
+    END LOOP;
+    
+    RAISE NOTICE 'Created campaign % with % coupons', new_campaign_id, p_quantity;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error creating coupon campaign: %', SQLERRM;
+END;
+$$;
+
+
+---23. xem thông tin các coupon trong một chiến dịch (campaign)
+CREATE OR REPLACE FUNCTION GetCouponsByCampaign(p_campaignId UUID)
 RETURNS TABLE (
-    employee_id UUID,
-    name VARCHAR(100),
-    email VARCHAR(50),
-    phone VARCHAR(15),
-    role Role,
-    shift_name VARCHAR(50),
-    shift_type VARCHAR(50),
-    shift_start TIMESTAMP,
-    shift_end TIMESTAMP,
-    start_time VARCHAR(15),
-    end_time VARCHAR(15)
+    CouponCode VARCHAR(30),
+    DiscountType VARCHAR,
+    DiscountValue DECIMAL(12,2),
+    MinOrderValue DECIMAL(12,2),
+    MaxDiscountValue DECIMAL(12,2),
+    Status VARCHAR,
+    ExpiresAt TIMESTAMP,
+    UsageLimit INT,
+    CampaignName VARCHAR(50)
 ) AS $$
 BEGIN
     RETURN QUERY
     SELECT 
-        e.id AS employee_id,
-        u.name,
-        u.email,
-        u.phone,
-        e.role,
-        st.name AS shift_name,
-        st.shiftType AS shift_type,
-        ws.shiftStart AS shift_start,
-        ws.shiftEnd AS shift_end,
-        st.startTime AS start_time,
-        st.endTime AS end_time
-    FROM 
-        WorkSchedule ws
-    JOIN 
-        Employee e ON ws.employeeId = e.id
-    JOIN 
-        User1 u ON e.userId = u.id
-    LEFT JOIN
-        ShiftTemplate st ON ws.shiftTemPlateId = st.id
-    WHERE 
-        e.isDeleted = FALSE
-        AND ws.isDeleted = FALSE
-        AND DATE(ws.date) = work_date
-    ORDER BY 
-        st.name,
-        u.name;
+        c.code AS CouponCode,
+        c.discountType::VARCHAR AS DiscountType,
+        c.discountValue AS DiscountValue,
+        c.minOrderValue AS MinOrderValue,
+        c.maxDiscountValue AS MaxDiscountValue,
+        c.status::VARCHAR AS Status,
+        c.expiresAt AS ExpiresAt,
+        c.usageLimit AS UsageLimit,
+        cmp.name AS CampaignName
+    FROM Coupon c
+    JOIN Campaign cmp ON c.campaignId = cmp.id::UUID
+    LEFT JOIN CouponTarget ct ON ct.couponId = c.id
+    WHERE c.campaignId = p_campaignId;
 END;
 $$ LANGUAGE plpgsql;
 
-
-
---6. In ra danh sách coupon (Coupon)
-CREATE OR REPLACE FUNCTION get_coupons(
-    status_filter CouponStatus DEFAULT NULL,
-    is_active_filter BOOLEAN DEFAULT NULL
+-- 24. Gán phiếu giảm giá cho người dùng
+CREATE OR REPLACE PROCEDURE assign_coupons_to_users(
+    p_campaign_id UUID
 )
-RETURNS TABLE (
-    coupon_id UUID,
-    code VARCHAR(30),
-    discount_type DiscountType,
-    discount_value DECIMAL(12,2),
-    min_order_value DECIMAL(12,2),
-    max_discount_value DECIMAL(12,2),
-    usage_limit INT,
-    status CouponStatus,
-    is_active BOOLEAN,
-    expires_at TIMESTAMP,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP,
-    campaign_name VARCHAR(50),
-    pool_name VARCHAR(150),
-    allocated_count INT,
-    usage_count BIGINT
-) AS $$
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    r_campaign RECORD;
+    r_user RECORD;
+    r_coupon RECORD;
 BEGIN
-    RETURN QUERY
-    SELECT 
-        c.id AS coupon_id,
-        c.code,
-        c.discountType AS discount_type,
-        c.discountValue AS discount_value,
-        c.minOrderValue AS min_order_value,
-        c.maxDiscountValue AS max_discount_value,
-        c.usageLimit AS usage_limit,
-        c.status,
-        c.isActive AS is_active,
-        c.expiresAt AS expires_at,
-        c.createdAt AS created_at,
-        c.updatedAt AS updated_at,
-        cam.name AS campaign_name,
-        cp.name AS pool_name,
-        cp.allocatedCount AS allocated_count,
-        COUNT(cu.id) AS usage_count
-    FROM 
-        Coupon c
-    LEFT JOIN 
-        Campaign cam ON c.campaignId = cam.id
-    LEFT JOIN 
-        CouponPool cp ON c.poolId = cp.id
-    LEFT JOIN 
-        CouponUsage cu ON c.id = cu.couponId
-    WHERE 
-        c.isDeleted = FALSE
-        AND (status_filter IS NULL OR c.status = status_filter)
-        AND (is_active_filter IS NULL OR c.isActive = is_active_filter)
-    GROUP BY
-        c.id, c.code, c.discountType, c.discountValue, c.minOrderValue, 
-        c.maxDiscountValue, c.usageLimit, c.status, c.isActive, c.expiresAt, 
-        c.createdAt, c.updatedAt, cam.name, cp.name, cp.allocatedCount
-    ORDER BY 
-        c.createdAt DESC;
+    -- Get campaign details
+    SELECT c.id, c.userTier, c.endDate
+    INTO r_campaign
+    FROM Campaign c
+    WHERE c.id = p_campaign_id;
+    
+    IF r_campaign.id IS NULL THEN
+        RAISE EXCEPTION 'Campaign not found';
+    END IF;
+    
+    -- Find eligible users
+    FOR r_user IN (
+        SELECT u.id, u.userTier
+        FROM User1 u
+        WHERE u.userTier = r_campaign.userTier
+          AND u.isActive = TRUE
+    )
+    LOOP
+        -- Find available coupon
+        SELECT c.id
+        INTO r_coupon
+        FROM Coupon c
+        WHERE c.campaignId = p_campaign_id
+          AND c.status = 'AVAILABLE'
+        LIMIT 1;
+        
+        IF r_coupon.id IS NOT NULL THEN
+            -- Assign coupon to user
+            INSERT INTO CouponTarget (
+                id, couponId, userId, userTier, sentAt,
+                expiresAt, usageLimit, isDeletad
+            )
+            VALUES (
+                gen_random_uuid(), r_coupon.id, r_user.id, r_user.userTier,
+                CURRENT_TIMESTAMP, r_campaign.endDate, 1, FALSE
+            );
+            
+            -- Update coupon status
+            UPDATE Coupon
+            SET status = 'ALLOCATED'
+            WHERE id = r_coupon.id;
+            
+            -- Update allocation count
+            UPDATE CouponPool
+            SET allocatedCount = allocatedCount + 1
+            WHERE campaignId = p_campaign_id;
+        END IF;
+    END LOOP;
+    
+    RAISE NOTICE 'Coupons assigned for campaign %', p_campaign_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION 'Error assigning coupons: %', SQLERRM;
 END;
-$$ LANGUAGE plpgsql;
-
-
---7. In ra danh sách bàn đã đặt (Table.TableStatus = ‘OCCUPIED’) (Table)
-CREATE OR REPLACE FUNCTION get_occupied_tables()
-RETURNS TABLE (
-    table_id UUID,
-    table_number VARCHAR(10),
-    capacity INT,
-    status TableStatus,
-    order_id UUID,
-    order_type OrderType,
-    order_date TIMESTAMP,
-    customer_name VARCHAR(100),
-    customer_phone VARCHAR(15),
-    total_amount DECIMAL(12,2)
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT 
-        t.id AS table_id,
-        t.number AS table_number,
-        t.capacity,
-        t.status,
-        o.id AS order_id,
-        o.orderType AS order_type,
-        o.orderDate AS order_date,
-        u.name AS customer_name,
-        u.phone AS customer_phone,
-        o.totalAmount AS total_amount
-    FROM 
-        Table1 t
-    LEFT JOIN 
-        Order1 o ON t.id = o.tableId AND o.status NOT IN ('CANCELLED', 'RETURNED', 'FAILED')
-    LEFT JOIN 
-        User1 u ON o.userId = u.id
-    WHERE 
-        t.status = 'OCCUPIED'
-        AND t.isDeleted = FALSE
-    ORDER BY 
-        t.number;
-END;
-$$ LANGUAGE plpgsql;
-
--- 8. Thêm User
-CREATE OR REPLACE PROCEDURE add_user(
-  p_id UUID,
-  p_name VARCHAR(100),
-  p_password VARCHAR(128),
-  p_email VARCHAR(50),
-  p_phone VARCHAR(15),
-  p_address VARCHAR(255),
-  p_isAdmin BOOLEAN DEFAULT FALSE,
-  p_isEmployee BOOLEAN DEFAULT FALSE,
-  p_createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  p_userTier UserTier DEFAULT 'BRONZE',
-  p_point INT DEFAULT 0
-)
-LANGUAGE SQL
-AS $$
-INSERT INTO User1 (id, name, password, email, phone, address, isAdmin, isEmployee, createdAt, userTier, point)
-VALUES (p_id, p_name, p_password, p_email, p_phone, p_address, p_isAdmin, p_isEmployee, p_createdAt, p_userTier, p_point);
-$$;
-
--- 9. Thêm Employee
-CREATE OR REPLACE PROCEDURE add_employee(
-  p_id UUID,
-  p_userId UUID,
-  p_salary DECIMAL(12,2),
-  p_hourlyRate DECIMAL(12,2),
-  p_hireDate TIMESTAMP,
-  p_role Role,
-  p_employmentType EmploymentType
-)
-LANGUAGE SQL
-AS $$
-INSERT INTO Employee (id, userId, salary, hourlyRate, hireDate, role, employmentType)
-VALUES (p_id, p_userId, p_salary, p_hourlyRate, p_hireDate, p_role, p_employmentType);
-$$;
-
--- 10. Thêm MenuItem
-CREATE OR REPLACE PROCEDURE add_menu_item(
-  p_id UUID,
-  p_name VARCHAR(100),
-  p_description VARCHAR(255),
-  p_price DECIMAL(12,2),
-  p_categoryId UUID,
-  p_isAvailable BOOLEAN DEFAULT TRUE
-)
-LANGUAGE SQL
-AS $$
-INSERT INTO MenuItem (id, name, description, price, categoryId, isAvailable)
-VALUES (p_id, p_name, p_description, p_price, p_categoryId, p_isAvailable);
-$$;
-
--- 11. Thêm OrderItem
-CREATE OR REPLACE PROCEDURE add_order_item(
-  p_id UUID,
-  p_orderId UUID,
-  p_menuItemId UUID,
-  p_quantity INT,
-  p_price DECIMAL(12,2)
-)
-LANGUAGE SQL
-AS $$
-INSERT INTO OrderItem (id, orderId, menuItemId, quantity, price)
-VALUES (p_id, p_orderId, p_menuItemId, p_quantity, p_price);
-$$;
-
--- 12. Thêm Coupon
-CREATE OR REPLACE PROCEDURE add_coupon(
-  p_id UUID,
-  p_code VARCHAR(30),
-  p_discountType DiscountType,
-  p_discountValue DECIMAL(12,2),
-  p_minOrderValue DECIMAL(12,2),
-  p_maxDiscountValue DECIMAL(12,2),
-  p_usageLimit INT,
-  p_status CouponStatus,
-  p_expiresAt TIMESTAMP,
-  p_campaignId UUID,
-  p_poolId UUID
-)
-LANGUAGE SQL
-AS $$
-INSERT INTO Coupon (id, code, discountType, discountValue, minOrderValue, maxDiscountValue, usageLimit, status, expiresAt, campaignId, poolId)
-VALUES (p_id, p_code, p_discountType, p_discountValue, p_minOrderValue, p_maxDiscountValue, p_usageLimit, p_status, p_expiresAt, p_campaignId, p_poolId);
 $$;
 
 
---13. Thêm Reservation
-CREATE OR REPLACE PROCEDURE add_reservation(
-  p_id UUID,
-  p_userId UUID,
-  p_orderId UUID,
-  p_reservationTime TIMESTAMP,
-  p_status ReservationStatus,
-)
-LANGUAGE SQL
-AS $$
-INSERT INTO Reservation (id, userId, orderId, reservationTime, status)
-VALUES (p_id, p_userId, p_orderId, p_reservationTime, p_status);
-$$;
 
-
---14. Thêm Review
+--25. Thêm Review
 CREATE OR REPLACE PROCEDURE add_review(
-  p_id UUID,
   p_userId UUID,
   p_orderId UUID,
   p_rating int,
   p_comment varchar(255),
-  p_createdAt TIMESTAMP
 )
 LANGUAGE SQL
 AS $$
+DECLARE
+   new_review_id UUID;
+SELECT gen_random_uuid() INTO new_review_id;
 INSERT INTO Review (id, userId, orderId, rating, comment, createdAt)
-VALUES (p_id, p_userId, p_orderId, p_rating, p_comment, p_createdAt);
+VALUES (new_review_id, p_userId, p_orderId, p_rating, p_comment, CURRENT_TIMESTAMP);
 $$;
 
 
