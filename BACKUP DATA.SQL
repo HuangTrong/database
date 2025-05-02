@@ -1522,7 +1522,6 @@ $$ LANGUAGE plpgsql;
 
 
 
-
 -- 22. Tạo chiến dịch phiếu giảm giá
 CREATE OR REPLACE PROCEDURE create_coupon_campaign(
     p_name VARCHAR(50),
@@ -1696,7 +1695,6 @@ END;
 $$;
 
 
-
 --25. Thêm Review
 CREATE OR REPLACE PROCEDURE add_review(
   p_userId UUID,
@@ -1716,28 +1714,299 @@ $$;
 
 
 
+
 --FUNCTIONS
---1. Tính số User đã đăng ký (User.isActive = true)
-CREATE OR REPLACE FUNCTION count_active_users()
-RETURNS INTEGER AS $$
+---1. Functions tính số lần sử dụng mã giảm giá của khách hàng
+CREATE OR REPLACE FUNCTION GetCouponUsageCountByUser(p_userId UUID)
+RETURNS INT AS $$
+DECLARE
+    usage_count INT;
 BEGIN
-    RETURN (SELECT COUNT(*) FROM User1 WHERE isActive = true 
-          AND isDeleted = false);
+    SELECT COUNT(*) INTO usage_count
+    FROM CouponUsage cu
+    WHERE cu.userId = p_userId;
+
+    RETURN usage_count;
 END;
 $$ LANGUAGE plpgsql;
 
 
---1.1 Tính số Employee đã vào làm (User.isEmployee = true)
-CREATE OR REPLACE FUNCTION count_employees()
-RETURNS INTEGER AS $$
+
+---2. Function theo dõi mức độ ưa thích của từng món ăn dựa trên số lượng đặt hàng và xếp hạng món ăn theo doanh thu.
+CREATE OR REPLACE FUNCTION GetMenuItemPopularitys()
+RETURNS TABLE (
+    MenuItemId UUID,
+    MenuItemName VARCHAR(100),
+    TotalQuantity INT,
+    TotalRevenue DECIMAL(12,2),
+    OrderCount BIGINT,
+    RevenueRank BIGINT,     -- Đã sửa từ INT → BIGINT
+    QuantityRank BIGINT     -- Đã sửa từ INT → BIGINT
+) AS $$
 BEGIN
-    RETURN (SELECT COUNT(*) FROM User1 WHERE isEmployee = true 
-          AND isDeleted = false);
+    RETURN QUERY
+    SELECT 
+        mi.id AS MenuItemId,
+        mi.name AS MenuItemName,
+        COALESCE(SUM(oi.quantity), 0)::INT AS TotalQuantity,
+        COALESCE(SUM(oi.quantity * oi.price), 0)::DECIMAL(12,2) AS TotalRevenue,
+        COUNT(DISTINCT oi.orderId)::BIGINT AS OrderCount,
+        RANK() OVER (ORDER BY SUM(oi.quantity * oi.price) DESC) AS RevenueRank,
+        RANK() OVER (ORDER BY SUM(oi.quantity) DESC) AS QuantityRank
+    FROM MenuItem mi
+    LEFT JOIN OrderItem oi ON mi.id = oi.menuItemId
+    LEFT JOIN Order1 o ON oi.orderId = o.id AND o.status = 'DELIVERED'
+    GROUP BY mi.id, mi.name
+    ORDER BY TotalRevenue DESC;
 END;
 $$ LANGUAGE plpgsql;
 
 
---2. Tính tổng lương của 1 Employee
+---3. Function: Doanh thu theo ngày / tháng / năm, Số lượng đơn hàng trong kỳ, Trung bình doanh thu trên mỗi đơn hàng, Tổng doanh thu tích lũy đến kỳ hiện tại
+CREATE OR REPLACE FUNCTION GetRevenueByDateGroup(p_groupType VARCHAR)
+RETURNS TABLE (
+    period TEXT,
+    totalRevenue DECIMAL(18, 2),
+    orderCount INT,
+    avgRevenuePerOrder DECIMAL(18, 2),
+    runningTotalRevenue DECIMAL(18, 2)
+) AS $$
+BEGIN
+    IF p_groupType = 'DAY' THEN
+        RETURN QUERY
+        SELECT 
+            sub.period,
+            sub.totalRevenue,
+            sub.orderCount,
+            sub.avgRevenuePerOrder,
+            SUM(sub.totalRevenue) OVER (ORDER BY sub.period ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS runningTotalRevenue
+        FROM (
+            SELECT 
+                TO_CHAR(o.orderDate, 'YYYY-MM-DD') AS period,
+                COALESCE(SUM(o.totalAmount), 0)::DECIMAL(18,2) AS totalRevenue,
+                COUNT(*)::INT AS orderCount,
+                COALESCE(AVG(o.totalAmount), 0)::DECIMAL(18,2) AS avgRevenuePerOrder
+            FROM Order1 o
+            WHERE o.status = 'DELIVERED'
+            GROUP BY TO_CHAR(o.orderDate, 'YYYY-MM-DD')
+            ORDER BY period
+        ) sub;
+
+    ELSIF p_groupType = 'MONTH' THEN
+        RETURN QUERY
+        SELECT 
+            sub.period,
+            sub.totalRevenue,
+            sub.orderCount,
+            sub.avgRevenuePerOrder,
+            SUM(sub.totalRevenue) OVER (ORDER BY sub.period ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS runningTotalRevenue
+        FROM (
+            SELECT 
+                TO_CHAR(o.orderDate, 'YYYY-MM') AS period,
+                COALESCE(SUM(o.totalAmount), 0)::DECIMAL(18,2) AS totalRevenue,
+                COUNT(*)::INT AS orderCount,
+                COALESCE(AVG(o.totalAmount), 0)::DECIMAL(18,2) AS avgRevenuePerOrder
+            FROM Order1 o
+            WHERE o.status = 'DELIVERED'
+            GROUP BY TO_CHAR(o.orderDate, 'YYYY-MM')
+            ORDER BY period
+        ) sub;
+
+    ELSIF p_groupType = 'YEAR' THEN
+        RETURN QUERY
+        SELECT 
+            sub.period,
+            sub.totalRevenue,
+            sub.orderCount,
+            sub.avgRevenuePerOrder,
+            SUM(sub.totalRevenue) OVER (ORDER BY sub.period ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS runningTotalRevenue
+        FROM (
+            SELECT 
+                TO_CHAR(o.orderDate, 'YYYY') AS period,
+                COALESCE(SUM(o.totalAmount), 0)::DECIMAL(18,2) AS totalRevenue,
+                COUNT(*)::INT AS orderCount,
+                COALESCE(AVG(o.totalAmount), 0)::DECIMAL(18,2) AS avgRevenuePerOrder
+            FROM Order1 o
+            WHERE o.status = 'DELIVERED'
+            GROUP BY TO_CHAR(o.orderDate, 'YYYY')
+            ORDER BY period
+        ) sub;
+
+    ELSE
+        RAISE EXCEPTION 'Invalid group type. Use DAY, MONTH or YEAR';
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---4. Function: Thống kê số lượng đơn hàng đã hoàn thành, Tổng doanh thu từ đơn thành công, Tổng số đơn (tất cả trạng thái), Tỷ lệ % đơn thành công
+CREATE OR REPLACE FUNCTION GetCompletedOrdersSummary()
+RETURNS TABLE (
+    completedOrderCount INT,
+    totalRevenue DECIMAL(18,2),
+    totalOrders INT,
+    successRatePercent DECIMAL(5,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        COUNT(*) FILTER (WHERE status = 'DELIVERED')::INT,
+        COALESCE(SUM(totalAmount) FILTER (WHERE status = 'DELIVERED'), 0)::DECIMAL(18,2),
+        COUNT(*)::INT,
+        ROUND(
+            (COUNT(*) FILTER (WHERE status = 'DELIVERED')::DECIMAL / NULLIF(COUNT(*), 0)) * 100,
+            2
+        )::DECIMAL(5,2)
+    FROM Order1;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---5. Function: Báo cáo doanh thu theo từng món ăn, Tỷ lệ phần trăm doanh thu so với tổng doanh thu, Phân hạng Top N món bán chạy nhất, tên danh mục món ăn, giá trung bình mỗi lần bán món đó
+CREATE OR REPLACE FUNCTION GetRevenueByMenuItem(topN INT)
+RETURNS TABLE (
+    Rank INT,
+    MenuItemId UUID,
+    MenuItemName VARCHAR(100),
+    CategoryName VARCHAR(100),
+    TotalQuantity INT,
+    TotalRevenue DECIMAL(18,2),
+    AvgPrice DECIMAL(18,2),
+    OrderCount INT,
+    RevenuePercentage DECIMAL(5,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        RANK() OVER (ORDER BY SUM(oi.quantity * oi.price) DESC)::INT AS Rank,  -- CHỈNH TẠI ĐÂY
+        mi.id AS MenuItemId,
+        mi.name AS MenuItemName,
+        mc.name AS CategoryName,
+        SUM(oi.quantity)::INT AS TotalQuantity,
+        SUM(oi.quantity * oi.price)::DECIMAL(18,2) AS TotalRevenue,
+        ROUND(AVG(oi.price), 2)::DECIMAL(18,2) AS AvgPrice,
+        COUNT(DISTINCT o.id)::INT AS OrderCount,
+        ROUND(
+            (SUM(oi.quantity * oi.price) / NULLIF((SELECT SUM(quantity * price) FROM OrderItem oi2 
+                                                  JOIN Order1 o2 ON oi2.orderId = o2.id AND o2.status = 'DELIVERED'), 0)) * 100,
+            2
+        )::DECIMAL(5,2) AS RevenuePercentage
+    FROM OrderItem oi
+    JOIN Order1 o ON oi.orderId = o.id AND o.status = 'DELIVERED'
+    JOIN MenuItem mi ON oi.menuItemId = mi.id
+    JOIN MenuCategory mc ON mi.categoryId = mc.id
+    GROUP BY mi.id, mi.name, mc.name
+    ORDER BY TotalRevenue DESC
+    LIMIT topN;
+END;
+$$ LANGUAGE plpgsql;
+
+
+---6. Function: So sánh doanh thu giữa hai khoảng thời gian, Doanh thu tăng/giảm bao nhiêu (giá trị tuyệt đối), Tỷ lệ phần trăm tăng/giảm (%), dữ liệu từng kỳ + dòng tổng kết
+CREATE OR REPLACE FUNCTION CompareRevenueBetweenPeriods(
+    p_startDate1 TIMESTAMP,
+    p_endDate1 TIMESTAMP,
+    p_startDate2 TIMESTAMP,
+    p_endDate2 TIMESTAMP
+)
+RETURNS TABLE (
+    period TEXT,
+    totalRevenue DECIMAL(18,2),
+    orderCount INT,
+    revenueChange DECIMAL(18,2),
+    revenueChangePercent DECIMAL(5,2),
+    orderChange INT,
+    orderChangePercent DECIMAL(5,2)
+) AS $$
+DECLARE
+    revenue1 DECIMAL(18,2);
+    revenue2 DECIMAL(18,2);
+    orders1 INT;
+    orders2 INT;
+BEGIN
+
+    --  Kiểm tra điều kiện: Khoảng thời gian 2 phải bắt đầu sau khi thời gian 1 kết thúc
+    IF p_startDate2 <= p_endDate1 THEN
+        RAISE EXCEPTION 'Khoảng thời gian sau (Period 2) phải bắt đầu sau khi khoảng thời gian trước (Period 1) kết thúc. Vui lòng kiểm tra lại ngày!';
+    END IF;
+
+    -- Lấy dữ liệu cho Period 1
+    SELECT COALESCE(SUM(totalAmount), 0), COUNT(*) INTO revenue1, orders1
+    FROM Order1
+    WHERE status = 'DELIVERED'
+      AND orderDate BETWEEN p_startDate1 AND p_endDate1;
+
+    -- Lấy dữ liệu cho Period 2
+    SELECT COALESCE(SUM(totalAmount), 0), COUNT(*) INTO revenue2, orders2
+    FROM Order1
+    WHERE status = 'DELIVERED'
+      AND orderDate BETWEEN p_startDate2 AND p_endDate2;
+
+    -- Trả về dữ liệu Period 1
+    RETURN QUERY
+    SELECT 
+        'Period 1'::TEXT,
+        revenue1,
+        orders1,
+        NULL::DECIMAL(18,2),
+        NULL::DECIMAL(5,2),
+        NULL::INT,
+        NULL::DECIMAL(5,2);
+
+    -- Trả về dữ liệu Period 2
+    RETURN QUERY
+    SELECT 
+        'Period 2'::TEXT,
+        revenue2,
+        orders2,
+        NULL::DECIMAL(18,2),
+        NULL::DECIMAL(5,2),
+        NULL::INT,
+        NULL::DECIMAL(5,2);
+
+    -- Trả về dòng so sánh
+    RETURN QUERY
+    SELECT 
+        'Comparison (P2 vs P1)'::TEXT,
+        NULL::DECIMAL(18,2),
+        NULL::INT,
+        (revenue2 - revenue1)::DECIMAL(18,2),
+        ROUND((revenue2 - revenue1) / NULLIF(revenue1, 0) * 100, 2)::DECIMAL(5,2),
+        (orders2 - orders1)::INT,
+        ROUND((orders2 - orders1)::DECIMAL / NULLIF(orders1, 0) * 100, 2)::DECIMAL(5,2);
+END;
+$$ LANGUAGE plpgsql;
+
+
+---7. Function: Doanh thu theo phương thức thanh toán, tỷ lệ phần trăm doanh thu so với tổng (RevenuePercentage)
+CREATE OR REPLACE FUNCTION GetRevenueByPaymentMethod()
+RETURNS TABLE (
+    PaymentMethod VARCHAR(50),
+    TotalRevenue DECIMAL(18,2),
+    OrderCount INT,
+    RevenuePercentage DECIMAL(5,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.method::VARCHAR(50),
+        SUM(p.amount)::DECIMAL(18,2),
+        COUNT(*)::INT,
+        ROUND(
+            (SUM(p.amount) / NULLIF((SELECT SUM(p2.amount) FROM Payment p2
+                                     JOIN Order1 o2 ON p2.orderId = o2.id AND o2.status = 'DELIVERED'), 0)) * 100,
+            2
+        )::DECIMAL(5,2)
+    FROM Payment p
+    JOIN Order1 o ON p.orderId = o.id AND o.status = 'DELIVERED'
+    GROUP BY p.method
+    ORDER BY TotalRevenue DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+---8. Tính tổng lương của 1 Employee
 CREATE OR REPLACE FUNCTION calculate_employee_salary(employee_id UUID)
 RETURNS DECIMAL(12,2) AS $$
 DECLARE
@@ -1753,69 +2022,6 @@ BEGIN
     WHERE employeeId = employee_id;
 
     RETURN COALESCE(net_salary, 0);
-END;
-$$ LANGUAGE plpgsql;
-
-
---3. Tính số coupon đã được kích hoạt (Coupon.isActive = true)
-CREATE OR REPLACE FUNCTION count_active_coupons()
-RETURNS INTEGER AS $$
-BEGIN
-    RETURN (SELECT COUNT(*) FROM Coupon WHERE isActive = true 
-          AND isDeleted = false);
-END;
-$$ LANGUAGE plpgsql;
-
-
---4. Tính số coupon đã được sử dụng (Coupon.status = 'USED')
-CREATE OR REPLACE FUNCTION count_used_coupons()
-RETURNS INTEGER AS $$
-BEGIN
-    RETURN (SELECT COUNT(*) FROM Coupon  WHERE status = 'USED'::CouponStatus 
-          AND isDeleted = false and isActive = true);
-END;
-$$ LANGUAGE plpgsql;
-
-
---5. Tính số bàn đã được đặt (Table.TableStatus = 'OCCUPIED')
-CREATE OR REPLACE FUNCTION count_occupied_tables()
-RETURNS INTEGER AS $$
-BEGIN
-    RETURN (SELECT COUNT(*) FROM Table1  WHERE status = 'OCCUPIED'::TableStatus 
-          AND isDeleted = false);
-END;
-$$ LANGUAGE plpgsql;
-
-
---6. Tính tổng số bàn có trong cửa hàng
-CREATE OR REPLACE FUNCTION count_total_tables()
-RETURNS INTEGER AS $$
-BEGIN
-    RETURN (SELECT COUNT(*) FROM Table1 WHERE isDeleted = false);
-END;
-$$ LANGUAGE plpgsql;
-
-
---7. Tính tổng số món ăn đã order trong 1 order
-CREATE OR REPLACE FUNCTION total_order_items(order_id UUID)
-RETURNS INTEGER AS $$
-BEGIN
-    RETURN (SELECT SUM(quantity) FROM OrderItem WHERE orderId = order_id);
-END;
-$$ LANGUAGE plpgsql;
-
-
---8. Số lượng order trong 1 tháng/1 ngày
-CREATE OR REPLACE FUNCTION count_orders_by_date(date_filter DATE, filter_type TEXT)
-RETURNS INTEGER AS $$
-BEGIN
-    IF filter_type = 'DAY' THEN
-        RETURN (SELECT COUNT(*) FROM Order1 WHERE DATE(orderDate) = date_filter);
-    ELSIF filter_type = 'MONTH' THEN
-        RETURN (SELECT COUNT(*) FROM Order1 WHERE DATE_TRUNC('month', orderDate) = DATE_TRUNC('month', date_filter));
-    ELSE
-        RAISE EXCEPTION 'Invalid filter type. Use "DAY" or "MONTH".';
-    END IF;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -2089,8 +2295,18 @@ ALTER USER restaurant_customer SET ROLE customer_role;
 --- Phân tất cả các quyền về Bảng, functions, procedures cho Admin_role
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_role;
-GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO admin_role;
-GRANT EXECUTE ON ALL PROCEDURES IN SCHEMA public TO admin_role;
+
+-- Phân quyền cho admin_role (quyền đầy đủ trên tất cả các functions)
+GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO admin_role;
+GRANT EXECUTE ON FUNCTION GetMenuItemPopularitys() TO admin_role;
+GRANT EXECUTE ON FUNCTION GetRevenueByDateGroup(VARCHAR) TO admin_role;
+GRANT EXECUTE ON FUNCTION GetCompletedOrdersSummary() TO admin_role;
+GRANT EXECUTE ON FUNCTION GetRevenueByMenuItem(INT) TO admin_role;
+GRANT EXECUTE ON FUNCTION CompareRevenueBetweenPeriods(TIMESTAMP, TIMESTAMP, TIMESTAMP, TIMESTAMP) TO admin_role;
+GRANT EXECUTE ON FUNCTION GetRevenueByPaymentMethod() TO admin_role;
+GRANT EXECUTE ON FUNCTION calculate_employee_salary(UUID) TO admin_role;
+GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO admin_role;
+
 
 
 
@@ -2123,6 +2339,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryItem TO manager_role;
 GRANT SELECT, INSERT, UPDATE ON Supplier TO manager_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryTransaction TO manager_role;
 
+-- Phân quyền cho manager_role (quyền truy cập vào hầu hết các functions báo cáo nhưng không có quyền truy cập nhân sự)
+GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO manager_role;
+GRANT EXECUTE ON FUNCTION GetMenuItemPopularitys() TO manager_role;
+GRANT EXECUTE ON FUNCTION GetRevenueByDateGroup(VARCHAR) TO manager_role;
+GRANT EXECUTE ON FUNCTION GetCompletedOrdersSummary() TO manager_role;
+GRANT EXECUTE ON FUNCTION GetRevenueByMenuItem(INT) TO manager_role;
+GRANT EXECUTE ON FUNCTION CompareRevenueBetweenPeriods(TIMESTAMP, TIMESTAMP, TIMESTAMP, TIMESTAMP) TO manager_role;
+GRANT EXECUTE ON FUNCTION GetRevenueByPaymentMethod() TO manager_role;
+GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO manager_role;
+
 
 
 --- Phân quyền về bảng của Employee_role
@@ -2150,6 +2376,13 @@ GRANT SELECT ON Campaign TO employee_role;
 GRANT SELECT ON Coupon TO employee_role;
 GRANT SELECT ON CouponUsage TO employee_role;
 
+-- Phân quyền cho employee_role (quyền truy cập hạn chế vào các functions cần thiết cho công việc)
+GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO employee_role;
+GRANT EXECUTE ON FUNCTION GetMenuItemPopularitys() TO employee_role;
+GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO employee_role;
+-- employee_role không có quyền truy cập vào các báo cáo doanh thu và chức năng lương
+
+
 
 
 
@@ -2167,4 +2400,10 @@ GRANT SELECT ON Payment TO customer_role;
 GRANT SELECT ON Coupon TO customer_role;
 GRANT SELECT ON Campaign TO customer_role;
 GRANT SELECT ON CouponUsage TO customer_role;
+
+-- Phân quyền cho customer_role (quyền truy cập rất hạn chế, chỉ liên quan đến thông tin khách hàng)
+GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO customer_role;
+GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO customer_role;
+
+
 
