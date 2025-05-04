@@ -586,24 +586,29 @@ EXCEPTION
 END;
 $$;
 
---- 2. Thêm Employee
+--- 2. Thêm Employee*
 CREATE OR REPLACE PROCEDURE add_employee(
   p_userId UUID,
   p_role Role,
   p_employmentType EmploymentType,
   p_employmentStatus EmploymentStatus
 )
-LANGUAGE SQL
+LANGUAGE plpgsql
 AS $$
 DECLARE
-    new_em_id UUID;
+    new_em_id uuid;
 BEGIN
     -- Generate new UUID
     SELECT gen_random_uuid() INTO new_em_id;
-    INSERT INTO Employee (id, userId, salary, hourlyRate, hireDate, role, employmentType, employmentStatus, isDeleted)
-    VALUES (new_em_id, p_userId, 0, 0, CURRENT_TIMESTAMP, p_role, p_employmentType, p_employmentStatus, FALSE);
+
+    INSERT INTO Employee (
+        id, userId, salary, hourlyRate, hireDate, role, employmentType, employmentStatus, isDeleted
+    ) VALUES (
+        new_em_id, p_userId, 0, 0, CURRENT_TIMESTAMP, p_role, p_employmentType, p_employmentStatus, FALSE
+    );
 
     RAISE NOTICE 'Employee created with ID: %', new_em_id;
+
 EXCEPTION
     WHEN unique_violation THEN
         RAISE EXCEPTION 'Employee ID already exists';
@@ -1695,22 +1700,26 @@ END;
 $$;
 
 
---25. Thêm Review
+--25. Thêm Review*
 CREATE OR REPLACE PROCEDURE add_review(
   p_userId UUID,
   p_orderId UUID,
-  p_rating int,
-  p_comment varchar(255),
+  p_rating INT,
+  p_comment VARCHAR(255)
 )
-LANGUAGE SQL
+LANGUAGE plpgsql
 AS $$
 DECLARE
    new_review_id UUID;
-SELECT gen_random_uuid() INTO new_review_id;
-INSERT INTO Review (id, userId, orderId, rating, comment, createdAt)
-VALUES (new_review_id, p_userId, p_orderId, p_rating, p_comment, CURRENT_TIMESTAMP);
-$$;
+BEGIN
+   -- Generate a new UUID
+   new_review_id := gen_random_uuid();
 
+   -- Insert into Review table
+   INSERT INTO Review (id, userId, orderId, rating, comment, createdAt)
+   VALUES (new_review_id, p_userId, p_orderId, p_rating, p_comment, CURRENT_TIMESTAMP);
+END;
+$$;
 
 
 
@@ -2292,11 +2301,39 @@ grant customer_role to restaurant_customer;
 ALTER USER restaurant_customer SET ROLE customer_role;
 
 
---- Phân tất cả các quyền về Bảng, functions, procedures cho Admin_role
+--- Phân tất cả các quyền về Bảng
+GRANT USAGE ON SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_role;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_role;
 
--- Phân quyền cho admin_role (quyền đầy đủ trên tất cả các functions)
+-- Phân quyền cho admin_role trên tất cả các Store Procedure
+GRANT EXECUTE ON PROCEDURE add_user TO admin_role;
+GRANT EXECUTE ON PROCEDURE add_employee TO admin_role;
+GRANT EXECUTE ON FUNCTION get_customers TO admin_role;
+GRANT EXECUTE ON FUNCTION get_employees_by_role TO admin_role;
+GRANT EXECUTE ON FUNCTION UpdateUserInfo TO admin_role;
+GRANT EXECUTE ON FUNCTION GetWorkScheduleByEmployeeId TO admin_role;
+GRANT EXECUTE ON PROCEDURE process_leave_request TO admin_role;
+GRANT EXECUTE ON PROCEDURE record_employee_attendance TO admin_role;
+GRANT EXECUTE ON FUNCTION GetAttendanceByEmployee TO admin_role;
+GRANT EXECUTE ON PROCEDURE create_employee_schedule TO admin_role;
+GRANT EXECUTE ON PROCEDURE generate_payroll TO admin_role;
+GRANT EXECUTE ON PROCEDURE add_reservation TO admin_role;
+GRANT EXECUTE ON FUNCTION GetReservationsByUserId TO admin_role;
+GRANT EXECUTE ON PROCEDURE add_order TO admin_role;
+GRANT EXECUTE ON PROCEDURE add_order_item TO admin_role;
+GRANT EXECUTE ON FUNCTION get_customer_orders TO admin_role;
+GRANT EXECUTE ON PROCEDURE process_payment TO admin_role;
+GRANT EXECUTE ON PROCEDURE check_inventory_levels TO admin_role;
+GRANT EXECUTE ON PROCEDURE update_inventory_after_order TO admin_role;
+GRANT EXECUTE ON FUNCTION GetDeliveryByTrackingCode TO admin_role;
+GRANT EXECUTE ON FUNCTION UpdateDelivery TO admin_role;
+GRANT EXECUTE ON PROCEDURE create_coupon_campaign TO admin_role;
+GRANT EXECUTE ON FUNCTION GetCouponsByCampaign TO admin_role;
+GRANT EXECUTE ON PROCEDURE assign_coupons_to_users TO admin_role;
+GRANT EXECUTE ON PROCEDURE add_review TO admin_role;
+
+-- Phân quyền cho admin_role trên tất cả Functions 
 GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO admin_role;
 GRANT EXECUTE ON FUNCTION GetMenuItemPopularitys() TO admin_role;
 GRANT EXECUTE ON FUNCTION GetRevenueByDateGroup(VARCHAR) TO admin_role;
@@ -2339,7 +2376,31 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryItem TO manager_role;
 GRANT SELECT, INSERT, UPDATE ON Supplier TO manager_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON InventoryTransaction TO manager_role;
 
--- Phân quyền cho manager_role (quyền truy cập vào hầu hết các functions báo cáo nhưng không có quyền truy cập nhân sự)
+-- Phân quyền cho manager_role trên Store Procedure
+GRANT EXECUTE ON PROCEDURE add_employee TO manager_role;
+GRANT EXECUTE ON FUNCTION get_customers TO manager_role;
+GRANT EXECUTE ON FUNCTION get_employees_by_role TO manager_role;
+GRANT EXECUTE ON FUNCTION UpdateUserInfo TO manager_role;
+GRANT EXECUTE ON FUNCTION GetWorkScheduleByEmployeeId TO manager_role;
+GRANT EXECUTE ON PROCEDURE process_leave_request TO manager_role;
+GRANT EXECUTE ON PROCEDURE record_employee_attendance TO manager_role;
+GRANT EXECUTE ON FUNCTION GetAttendanceByEmployee TO manager_role;
+GRANT EXECUTE ON PROCEDURE create_employee_schedule TO manager_role;
+GRANT EXECUTE ON PROCEDURE add_reservation TO manager_role;
+GRANT EXECUTE ON FUNCTION GetReservationsByUserId TO manager_role;
+GRANT EXECUTE ON PROCEDURE add_order TO manager_role;
+GRANT EXECUTE ON PROCEDURE add_order_item TO manager_role;
+GRANT EXECUTE ON FUNCTION get_customer_orders TO manager_role;
+GRANT EXECUTE ON PROCEDURE process_payment TO manager_role;
+GRANT EXECUTE ON PROCEDURE check_inventory_levels TO manager_role;
+GRANT EXECUTE ON PROCEDURE update_inventory_after_order TO manager_role;
+GRANT EXECUTE ON FUNCTION GetDeliveryByTrackingCode TO manager_role;
+GRANT EXECUTE ON FUNCTION UpdateDelivery TO manager_role;
+GRANT EXECUTE ON FUNCTION GetCouponsByCampaign TO manager_role;
+GRANT EXECUTE ON PROCEDURE assign_coupons_to_users TO manager_role;
+GRANT EXECUTE ON PROCEDURE add_review TO manager_role;
+
+-- Phân quyền cho manager_role trên Functions
 GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO manager_role;
 GRANT EXECUTE ON FUNCTION GetMenuItemPopularitys() TO manager_role;
 GRANT EXECUTE ON FUNCTION GetRevenueByDateGroup(VARCHAR) TO manager_role;
@@ -2352,6 +2413,8 @@ GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO manager_role;
 
 
 --- Phân quyền về bảng của Employee_role
+GRANT USAGE ON SCHEMA public TO employee_role;
+
 GRANT SELECT, UPDATE ON User1 TO employee_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON LeaveRequest TO employee_role;
 GRANT SELECT ON Attendance TO employee_role;
@@ -2376,17 +2439,37 @@ GRANT SELECT ON Campaign TO employee_role;
 GRANT SELECT ON Coupon TO employee_role;
 GRANT SELECT ON CouponUsage TO employee_role;
 
--- Phân quyền cho employee_role (quyền truy cập hạn chế vào các functions cần thiết cho công việc)
+-- Phân quyền cho employee_role trên Store Procedure
+GRANT EXECUTE ON FUNCTION get_customers TO employee_role;
+GRANT EXECUTE ON FUNCTION get_employees_by_role TO employee_role;
+GRANT EXECUTE ON FUNCTION UpdateUserInfo TO employee_role;
+GRANT EXECUTE ON FUNCTION GetWorkScheduleByEmployeeId TO employee_role;
+GRANT EXECUTE ON FUNCTION GetAttendanceByEmployee TO employee_role;
+GRANT EXECUTE ON PROCEDURE add_reservation TO employee_role;
+GRANT EXECUTE ON FUNCTION GetReservationsByUserId TO employee_role;
+GRANT EXECUTE ON PROCEDURE add_order TO employee_role;
+GRANT EXECUTE ON PROCEDURE add_order_item TO employee_role;
+GRANT EXECUTE ON FUNCTION get_customer_orders TO employee_role;
+GRANT EXECUTE ON PROCEDURE process_payment TO employee_role;
+GRANT EXECUTE ON PROCEDURE check_inventory_levels TO employee_role;
+GRANT EXECUTE ON PROCEDURE update_inventory_after_order TO employee_role;
+GRANT EXECUTE ON FUNCTION GetDeliveryByTrackingCode TO employee_role;
+GRANT EXECUTE ON FUNCTION UpdateDelivery TO employee_role;
+GRANT EXECUTE ON FUNCTION GetCouponsByCampaign TO employee_role;
+
+-- Phân quyền cho employee_role trên Functions
 GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO employee_role;
 GRANT EXECUTE ON FUNCTION GetMenuItemPopularitys() TO employee_role;
 GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO employee_role;
--- employee_role không có quyền truy cập vào các báo cáo doanh thu và chức năng lương
+
 
 
 
 
 
 --- Phân quyền về bảng của Customer_role
+GRANT USAGE ON SCHEMA public TO customer_role;
+
 GRANT SELECT, UPDATE ON User1 TO customer_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON Reservation TO customer_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON Review TO customer_role;
@@ -2401,7 +2484,17 @@ GRANT SELECT ON Coupon TO customer_role;
 GRANT SELECT ON Campaign TO customer_role;
 GRANT SELECT ON CouponUsage TO customer_role;
 
--- Phân quyền cho customer_role (quyền truy cập rất hạn chế, chỉ liên quan đến thông tin khách hàng)
+-- Phân quyền cho customer_role trên Store Procedure
+GRANT EXECUTE ON FUNCTION UpdateUserInfo TO customer_role;
+GRANT EXECUTE ON PROCEDURE add_reservation TO customer_role;
+GRANT EXECUTE ON FUNCTION GetReservationsByUserId TO customer_role;
+GRANT EXECUTE ON PROCEDURE add_order TO customer_role;
+GRANT EXECUTE ON PROCEDURE add_order_item TO customer_role;
+GRANT EXECUTE ON FUNCTION get_customer_orders TO customer_role;
+GRANT EXECUTE ON FUNCTION GetDeliveryByTrackingCode TO customer_role;
+GRANT EXECUTE ON PROCEDURE add_review TO customer_role;
+
+-- Phân quyền cho customer_role trên Functions
 GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO customer_role;
 GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO customer_role;
 
