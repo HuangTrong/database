@@ -549,7 +549,7 @@ fk_inventoryItemId_IT FOREIGN KEY (inventoryItemId) REFERENCES InventoryItem(id)
 
 
 --STORE PROCEDURE
---- 1. Thêm User
+--- 1. Thêm customer
 CREATE OR REPLACE PROCEDURE add_user(
     p_name VARCHAR(100),
     p_password VARCHAR(128),
@@ -2497,6 +2497,77 @@ GRANT EXECUTE ON PROCEDURE add_review TO customer_role;
 -- Phân quyền cho customer_role trên Functions
 GRANT EXECUTE ON FUNCTION GetCouponUsageCountByUser(UUID) TO customer_role;
 GRANT EXECUTE ON FUNCTION calculate_order_total(UUID) TO customer_role;
+
+
+
+--- Tạo trigger mã hoá mật khẩu khi Insert new User
+CREATE OR REPLACE FUNCTION encrypt_user_password()
+RETURNS TRIGGER AS $$
+DECLARE
+    encrypted_password TEXT; --Lưu trữ giá trị mật khẩu sau khi được mã hóa.
+    secret_key TEXT := 'key_password'; -- Khóa bí mật dùng để mã hóa AES.
+BEGIN
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND OLD.password IS DISTINCT FROM NEW.password) THEN --Kiểm tra loại hành động (INSERT hoặc UPDATE có thay đổi mật khẩu)
+        -- Băm mật khẩu bằng bcrypt
+        encrypted_password := crypt(NEW.password, gen_salt('bf'));
+
+        -- Mã hóa bằng AES-256 CBC
+        encrypted_password := pgp_sym_encrypt(encrypted_password, secret_key, 'cipher-algo=aes256');
+
+        -- Gán vào trường password
+        NEW.password := encrypted_password;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER before_user_insert_update -- Gọi hàm trên trước khi chèn hoặc cập nhật dữ liệu.
+BEFORE INSERT OR UPDATE ON User1
+FOR EACH ROW
+EXECUTE FUNCTION encrypt_user_password(); --Gọi hàm xử lý mỗi lần trigger kích hoạt.
+
+-- Dùng hàm store procedure thêm User add_user(name, password, email, phone, address) để thêm một User vào hệ thống
+CALL add_user('Robert G. Holman', 'my_plain_password', 'RobertGHolman@example.com', '447706218252', '80 Peachfield Road, CHADDERTON');
+
+
+
+select password 
+from User1
+where email = 'RobertGHolman@example.com';
+
+
+-- Xác thực
+CREATE OR REPLACE FUNCTION verify_user_login(p_email TEXT, p_password TEXT)
+RETURNS BOOLEAN AS $$
+-- Khai báo biến cục bộ
+DECLARE
+    stored_encrypted_password TEXT; --Lưu trữ mật khẩu đã được mã hóa từ DB.
+    secret_key TEXT := 'key_password'; --Khóa bí mật dùng để giải mã AES-256 (phải giống với khóa đã dùng để mã hóa).
+    decrypted_hashed_password TEXT; --Kết quả sau khi giải mã
+BEGIN
+    SELECT password INTO stored_encrypted_password FROM User1 WHERE email = p_email; --Truy vấn mật khẩu đã mã hóa từ bảng User
+
+	--Kiểm tra xem email có tồn tại không
+    IF stored_encrypted_password IS NULL THEN
+        RETURN FALSE;
+    END IF;
+
+	--Giải mã mật khẩu đã lưu
+    BEGIN
+        decrypted_hashed_password := pgp_sym_decrypt(stored_encrypted_password::bytea, secret_key); 
+    EXCEPTION WHEN others THEN
+        RAISE WARNING 'Xác thực thất bại cho người dùng: %', p_email;
+        RETURN FALSE;
+    END;
+
+	--So sánh mật khẩu người dùng nhập vào với mật khẩu đã lưu
+    RETURN crypt(p_password, decrypted_hashed_password) = decrypted_hashed_password;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT verify_user_login('RobertGHolman@example.com', 'my_plain_password');
+SELECT verify_user_login('RobertGHolman@example.com', 'myplainpassword');
 
 
 
