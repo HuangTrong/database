@@ -2548,7 +2548,7 @@ DECLARE
 BEGIN
     SELECT password INTO stored_encrypted_password FROM User1 WHERE email = p_email; --Truy vấn mật khẩu đã mã hóa từ bảng User
 
-	--Kiểm tra xem email có tồn tại không
+	--Kiểm tra xem password đã được mã hoá có tồn tại trong database hay không
     IF stored_encrypted_password IS NULL THEN
         RETURN FALSE;
     END IF;
