@@ -2537,6 +2537,13 @@ from User1
 where email = 'RobertGHolman@example.com';
 
 
+-- Kiểm tra xem extension đã có chưa
+SELECT * FROM pg_available_extensions WHERE name = 'pgcrypto';
+
+-- Cài đặt extension nếu chưa có
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+
 -- Xác thực
 CREATE OR REPLACE FUNCTION verify_user_login(p_email TEXT, p_password TEXT)
 RETURNS BOOLEAN AS $$
@@ -2570,4 +2577,529 @@ SELECT verify_user_login('RobertGHolman@example.com', 'my_plain_password');
 SELECT verify_user_login('RobertGHolman@example.com', 'myplainpassword');
 
 
+CREATE OR REPLACE FUNCTION sync_pg_user()
+RETURNS TRIGGER AS $$
+DECLARE
+    username TEXT;
+    userRole TEXT;
+BEGIN
+    -- Xử lý tên người dùng: biến email thành tên PostgreSQL hợp lệ
+    username := replace(replace(replace(lower(NEW.email), '@', '_at_'), '.', '_'), '-', '_');
+
+    -- Xác định vai trò người dùng
+    IF NEW.isAdmin = TRUE THEN
+        userRole := 'admin_role';
+    ELSIF NEW.isEmployee = TRUE AND EXISTS (
+        SELECT 1 FROM Employee e WHERE e.userId = NEW.id AND e.role = 'MANAGER'
+    ) THEN
+        userRole := 'manager_role';
+    ELSIF NEW.isEmployee = TRUE THEN
+        userRole := 'employee_role';
+    ELSE
+        userRole := 'customer_role';
+    END IF;
+
+    -- Nếu là thao tác INSERT → Tạo user mới
+    IF TG_OP = 'INSERT' THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = username) THEN
+            EXECUTE FORMAT('CREATE USER %I WITH PASSWORD %L;', username, NEW.password);
+            EXECUTE FORMAT('GRANT %I TO %I;', userRole, username);
+            EXECUTE FORMAT('ALTER USER %I SET ROLE %I;', username, userRole);
+        END IF;
+
+    -- Nếu là thao tác UPDATE → Cập nhật mật khẩu hoặc vai trò
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = username) THEN
+            -- Cập nhật mật khẩu nếu thay đổi
+            IF NEW.password IS DISTINCT FROM OLD.password THEN
+                EXECUTE FORMAT('ALTER USER %I WITH PASSWORD %L;', username, NEW.password);
+            END IF;
+
+            -- Cập nhật role nếu thay đổi điều kiện
+            EXECUTE FORMAT('REVOKE ALL ON SCHEMA public FROM %I;', username); -- Revoke cũ
+            EXECUTE FORMAT('GRANT %I TO %I;', userRole, username);
+            EXECUTE FORMAT('ALTER USER %I SET ROLE %I;', username, userRole);
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE TRIGGER trg_sync_pg_user
+AFTER INSERT OR UPDATE ON User1
+FOR EACH ROW
+EXECUTE FUNCTION sync_pg_user();
+
+
+
+SELECT 
+    u.rolname AS user_name,
+    u.rolcanlogin,
+    ARRAY(
+        SELECT r.rolname
+        FROM pg_auth_members m
+        JOIN pg_roles r ON m.roleid = r.oid
+        WHERE m.member = u.oid
+    ) AS roles
+FROM pg_roles u
+WHERE u.rolcanlogin = true
+ORDER BY u.rolname;
+
+
+-- Xem tất cả view trong database hiện tại
+SELECT table_name 
+FROM information_schema.views 
+WHERE table_schema = 'public';
+-- Hoặc chi tiết hơn
+SELECT table_schema, table_name, view_definition 
+FROM information_schema.views 
+WHERE table_schema NOT IN ('pg_catalog', 'information_schema');
+
+-- Xem quyền trên tất cả view
+SELECT grantee, table_name, privilege_type 
+FROM information_schema.role_table_grants 
+WHERE table_schema = 'public' AND table_name IN (
+    SELECT table_name 
+    FROM information_schema.views 
+    WHERE table_schema = 'public'
+);
+-- Liệt kê tất cả role
+SELECT rolname FROM pg_roles;
+-- Xem view bạn có quyền truy cập
+SELECT table_name 
+FROM information_schema.views 
+WHERE table_schema = 'public'
+AND has_table_privilege(current_user, table_name, 'SELECT');
+
+----- Xem quyền cụ thể của từng user trên database hiện tại
+SELECT 
+    grantee AS username,
+    privilege_type,
+    table_name
+FROM 
+    information_schema.role_table_grants
+WHERE 
+    grantee NOT LIKE 'pg_%' -- Loại bỏ các role hệ thống
+ORDER BY 
+    grantee, table_name, privilege_type;
+
+
+----- View
+--- View ẩn thông tin cá nhân
+-- View chỉ cho phép xem thông tin tài khoản của chính mình
+CREATE OR REPLACE VIEW user1_safe_view AS
+SELECT	
+	id, name, password, email, phone,
+    address, isAdmin, isEmployee, isActive,
+    createdAt, updatedAt, userTier, point, isDeleted
+FROM User1
+WHERE email = current_user
+
+-- thu hồi quyền SELECT TRÊN user1 và cấp lại trên các view
+REVOKE SELECT ON User1 FROM admin_role, manager_role, 
+						employee_role, customer_role;
+GRANT SELECT ON user1_safe_view TO admin_role;
+GRANT SELECT ON user1_safe_view TO manager_role;
+GRANT SELECT ON user1_safe_view TO employee_role;
+GRANT SELECT ON user1_safe_view TO customer_role;
+
+--- View ẩn thông tin lương với các nhân viên khác
+CREATE OR REPLACE VIEW employee_view AS
+SELECT
+    id,
+    userId,
+    hireDate,
+    role,
+    employmentType,
+    employmentStatus,
+    isDeleted
+FROM Employee;
+ 
+REVOKE SELECT ON Employee FROM employee_role;
+GRANT SELECT ON employee_view TO employee_role;
+
+-- View ẩn thông tin phiếu lương của các nhân viên với nhau
+CREATE OR REPLACE VIEW payroll_safe_view AS
+SELECT
+    P.id,
+    P.employeeId,
+	P.baseSalary,
+	P.hourlyRate,
+	P.workedHours,
+	P.standardHours,
+	P.overtimePay,
+	P.deductions,
+	P.netSalary,
+	P.createdAt
+FROM Payroll P join Employee E on P.employeeId = E.id
+		join User1 U on E.userId = U.id
+WHERE U.email = current_user
+
+REVOKE SELECT ON Payroll FROM employee_role;
+GRANT SELECT ON payroll_safe_view TO employee_role;
+
+--- View thống kê các phiếu giảm giá khả dụng cho User
+CREATE OR REPLACE VIEW user_available_coupons AS
+SELECT 
+    c.id AS coupon_id,
+    c.code AS coupon_code,
+    c.discountType,
+    c.discountValue,
+    c.minOrdervalue,
+    c.maxDiscountValue,
+    ut.usageLimit,
+    ut.expiresAt,
+    ut.sentAt,
+    c.status,
+    c.isActive 
+FROM User1 u JOIN CouponTarget ut ON u.id = ut.userId
+		JOIN Coupon c ON ut.couponId = c.id
+WHERE u.email = current_user
+    AND c.isActive = true
+    AND ut.isDeletad = false
+    AND (c.expiresAt IS NULL OR c.expiresAt > CURRENT_TIMESTAMP)
+    AND (ut.expiresAt > CURRENT_TIMESTAMP)
+    AND (ut.usageLimit > 0 OR ut.usageLimit IS NULL)
+	AND c.status = 'ALLOCATED'
+    AND u.isActive = true
+    AND u.isDeleted = false;
+
+GRANT SELECT ON user_available_coupons TO admin_role, 
+			manager_role, employee_role, customer_role;
+
+--- View thống kê các hóa đơn trong 30 ngày gần đây
+CREATE VIEW recent_orders_last_30_days AS
+SELECT *
+FROM Order1
+WHERE orderDate >= NOW() - INTERVAL '30 days';
+
+GRANT SELECT ON recent_orders_last_30_days TO admin_role, 
+				manager_role, employee_role, customer_role;
+
+--- View xem các đơn hàng mà mình mua
+CREATE VIEW my_orders AS
+SELECT o.*
+FROM Order1 o JOIN User1 u ON o.userId = u.id
+WHERE u.email = current_user;
+
+GRANT SELECT ON my_orders TO admin_role, 
+				manager_role, employee_role, customer_role;
+
+--- View xem top 10 sản phẩm bán chạy nhất trong 30 ngày gần đây
+CREATE OR REPLACE VIEW Top10BestSellingItems_30Days AS
+SELECT 
+    m.id AS menuItemId,
+    m.name AS menuItemName,
+    SUM(oi.quantity) AS totalSold,
+    m.price,
+    m.imageUrl
+FROM OrderItem oi JOIN MenuItem m ON oi.menuItemId = m.id
+	 JOIN Order1 o ON oi.orderId = o.id
+WHERE m.isDeleted = FALSE 
+    AND m.isAvailable = TRUE
+    AND o.orderDate >= NOW() - INTERVAL '30 days'
+GROUP BY m.id, m.name, m.price, m.imageUrl
+ORDER BY totalSold DESC
+LIMIT 10;
+
+GRANT SELECT ON Top10BestSellingItems_30Days TO admin_role, 
+				manager_role, employee_role, customer_role;
+
+--- View xem  lịch làm tuần hiện tại của nhân viên
+CREATE OR REPLACE VIEW WeeklyWorkScheduleSimple AS
+SELECT 
+    employeeId,
+    date,
+    shiftStart,
+    shiftEnd,
+    createdAt
+FROM WorkSchedule
+WHERE isDeleted = FALSE
+    AND date >= date_trunc('week', CURRENT_DATE)                         -- thứ 2 tuần này
+    AND date < date_trunc('week', CURRENT_DATE) + INTERVAL '7 days'         -- trước thứ 2 tuần sau
+ORDER BY employeeId, date;
+
+GRANT SELECT ON WeeklyWorkScheduleSimple TO admin_role, 
+				manager_role, employee_role;
+
+--- View xem bảng chấm công của nhân viên trong tháng
+CREATE OR REPLACE VIEW MonthlyAttendance AS
+SELECT 
+    id AS attendanceId,
+    employeeId,
+    workDate,
+    checkIn,
+    checkOut,
+    notes
+FROM 
+    Attendance
+WHERE isDeleted = FALSE
+    AND workDate >= date_trunc('month', CURRENT_DATE)                         -- từ đầu tháng
+    AND workDate < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'    -- đến trước đầu tháng sau
+ORDER BY employeeId, workDate;
+
+GRANT SELECT ON MonthlyAttendance TO admin_role, 
+				manager_role, employee_role;
+
+--- View danh sách hàng nhập kho trong tháng hiện tại
+CREATE OR REPLACE VIEW MonthlyInventoryImport AS
+SELECT 
+    it.id AS transactionId,
+    ii.name AS itemName,
+    ii.category,
+    it.quantity,
+    it.price,
+    it.timestamp
+FROM InventoryTransaction it  JOIN 
+    InventoryItem ii ON it.inventoryItemId = ii.id
+WHERE it.transactionType = 'IMPORT'
+    AND it.timestamp >= date_trunc('month', CURRENT_DATE)
+    AND it.timestamp < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+ORDER BY it.timestamp DESC;
+
+GRANT SELECT ON MonthlyInventoryImport TO admin_role, manager_role;
+
+--- View danh sách hàng xuất kho trong tháng hiện tại
+CREATE OR REPLACE VIEW MonthlyInventoryExport AS
+SELECT 
+    it.id AS transactionId,
+    ii.name AS itemName,
+    ii.category,
+    it.quantity,
+    it.price,
+    it.timestamp
+FROM InventoryTransaction it JOIN 
+    InventoryItem ii ON it.inventoryItemId = ii.id
+WHERE it.transactionType = 'EXPORT'
+    AND it.timestamp >= date_trunc('month', CURRENT_DATE)
+    AND it.timestamp < date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'
+ORDER BY it.timestamp DESC;
+
+GRANT SELECT ON MonthlyAttendance TO admin_role, manager_role;
+
+--- View thống kê các bàn còn trống trong 2 giờ tới
+CREATE VIEW AvailableTablesInNext2Hours AS
+SELECT 
+    t.id,
+    t.number,
+    t.capacity,
+    t.status
+FROM Table1 t
+WHERE t.isDeleted = false
+    AND t.status = 'AVAILABLE'
+    AND t.id NOT IN (
+        SELECT o.tableId
+        FROM Reservation r
+        JOIN Order1 o ON r.orderId = o.id
+        WHERE 
+            r.reservationTime BETWEEN CURRENT_TIMESTAMP AND CURRENT_TIMESTAMP 
+			+ INTERVAL '2 hours' AND r.status IN ('PENDING', 'CONFIRMED')
+            AND r.isDeleted = false );
+
+GRANT SELECT ON AvailableTablesInNext2Hours TO admin_role, 
+				manager_role, employee_role, customer_role;
+
+--- View thống kê các đơn hàng phải giao lại trong ngày hôm nay
+CREATE OR REPLACE VIEW orders_with_multiple_deliveries AS
+SELECT 
+    d.orderId AS order_id,
+    COUNT(*) AS delivery_attempts,  -- Đếm số giao hàng cho mỗi hóa đơn
+    MAX(d.deliveryDate) AS last_delivery_date,
+    MAX(d.status) AS last_delivery_status,
+    STRING_AGG(d.carrier, ', ' ORDER BY d.deliveryDate) AS carriers_used,
+    STRING_AGG(d.trackingCode, ', ' ORDER BY d.deliveryDate) AS tracking_codes
+FROM Delivery d
+WHERE d.status::DeliveryStatus IN ('IN_TRANSIT', 'DELIVERED', 'FAILED')
+		AND DATE(d.deliveryDate) = CURRENT_DATE
+GROUP BY d.orderId
+HAVING COUNT(*) >= 2;  
+
+GRANT SELECT ON orders_with_multiple_deliveries TO admin_role, 
+					manager_role, employee_role, customer_role;
+
+--- View thống kê số lượng tài khoản khách hàng tạo mỗi tháng trong 12 thánh gần nhất
+CREATE OR REPLACE VIEW monthly_customer_registrations AS
+SELECT 
+    DATE_TRUNC('month', createdAt) AS registration_month,
+    COUNT(id) AS user_count
+FROM User1
+WHERE 
+    createdAt >= (DATE_TRUNC('month', CURRENT_DATE) - INTERVAL '11 months')
+    AND isDeleted = false
+    AND isActive = true
+    AND isEmployee = false
+	AND isAdmin = false
+GROUP BY DATE_TRUNC('month', createdAt)
+ORDER BY registration_month DESC;
+
+GRANT SELECT ON monthly_customer_registrations TO admin_role, 
+									manager_role, employee_role;
+
+--- View đếm số lượng khách hàng theo hạng thành viên
+CREATE OR REPLACE VIEW customr_tier_statistics AS
+SELECT 
+    userTier AS membership_tier,
+    COUNT(id) AS user_count,
+    ROUND(COUNT(id) * 100.0 / (SELECT COUNT(*) 
+							FROM User1 
+							WHERE isDeleted = false
+							AND isAdmin = false
+							AND isEmployee = false), 2) AS percentage
+FROM User1
+WHERE isDeleted = false
+    AND isEmployee = false
+	AND isAdmin = false
+    AND userTier IS NOT NULL
+GROUP BY userTier
+ORDER BY 
+    CASE userTier
+        WHEN 'GOLD' THEN 1
+        WHEN 'SILVER' THEN 2
+        WHEN 'BRONZE' THEN 3
+    END;
+
+GRANT SELECT ON customr_tier_statistics TO admin_role, 
+					manager_role, employee_role;
+
+--- View tính doanh thu trong ngày hiện tại
+CREATE OR REPLACE VIEW daily_net_revenue AS
+SELECT
+    CURRENT_DATE AS report_date,
+    -- Tổng doanh thu thực tế (chỉ tính giao dịch thành công)
+    SUM(p.amount) AS net_revenue,
+    -- Phân tích theo phương thức thanh toán
+    SUM(CASE WHEN p.method = 'CASH' THEN p.amount ELSE 0 END) AS cash_revenue,
+    SUM(CASE WHEN p.method = 'CREDIT_CARD' THEN p.amount ELSE 0 END) AS credit_card_revenue,
+    SUM(CASE WHEN p.method = 'BANK_TRANSFER' THEN p.amount ELSE 0 END) AS bank_transfer_revenue,
+    -- Thống kê giao dịch
+    COUNT(DISTINCT o.id) AS successful_order_count,
+    COUNT(DISTINCT CASE WHEN p.status = 'REFUNDED' THEN p.id END) AS refunded_transactions,
+    SUM(CASE WHEN p.status = 'REFUNDED' THEN p.amount ELSE 0 END) AS refunded_amount
+FROM Order1 o JOIN Payment p ON o.id = p.orderId
+WHERE DATE(p.paymentDate) = CURRENT_DATE
+    AND o.isDeleted = false
+    AND p.status::PaymentStatus = 'COMPLETED';
+
+GRANT SELECT ON daily_net_revenue TO admin_role, manager_role, employee_role
+
+--- View thống kê giao dịch lỗi/hoàn tiền
+CREATE OR REPLACE VIEW payment_issue_stats AS
+SELECT
+    CURRENT_DATE AS report_date,
+    COUNT(CASE WHEN p.status = 'FAILED' THEN p.id END) AS failed_payments,
+    COUNT(CASE WHEN p.status = 'REFUNDED' THEN p.id END) AS refunded_payments,
+    SUM(CASE WHEN p.status = 'FAILED' THEN p.amount ELSE 0 END) AS failed_amount,
+    SUM(CASE WHEN p.status = 'REFUNDED' THEN p.amount ELSE 0 END) AS refunded_amount,
+    ROUND(COUNT(CASE WHEN p.status = 'FAILED' THEN p.id END) * 100.0 / 
+         NULLIF(COUNT(p.id), 0), 2) AS failure_rate_percentage
+FROM Payment p
+WHERE DATE(p.paymentDate) = CURRENT_DATE;
+
+GRANT SELECT ON payment_issue_stats TO admin_role, manager_role, employee_role
+
+--- View thống kê phiếu giảm giá theo chiến dịch
+CREATE OR REPLACE VIEW campaign_coupon_usage_stats AS
+SELECT 
+    c.id AS campaign_id,
+    c.name AS campaign_name,
+    c.startDate AS start_date,
+    c.endDate AS end_date,
+    -- Thống kê ban hành
+    COUNT(DISTINCT cp.id) AS total_coupons_created,
+    -- Thống kê sử dụng (từ bảng CouponUsage)
+    COUNT(DISTINCT cu.id) AS total_coupons_used,
+    COUNT(DISTINCT cu.userId) AS unique_users_used,
+    -- Tính tỷ lệ sử dụng (dựa trên số phiếu đã tạo)
+    ROUND(COUNT(DISTINCT cu.id) * 100.0 / NULLIF(COUNT(DISTINCT cp.id), 0), 2) 
+			AS usage_rate_percentage
+FROM Campaign c LEFT JOIN Coupon cp ON c.id = cp.campaignId
+    LEFT JOIN CouponUsage cu ON cp.id = cu.couponId
+WHERE c.isDeleted = false
+    AND cp.isDeleted = false
+GROUP BY c.id, c.name, c.startDate, c.endDate
+ORDER BY c.startDate DESC;
+
+GRANT SELECT ON campaign_coupon_usage_stats TO admin_role, 
+						manager_role, employee_role;
+
+---  View thống kê người người dùng đăng nhập theo giờ
+CREATE OR REPLACE VIEW daily_active_users AS
+SELECT
+    DATE(t.createdAt) AS login_date,
+    COUNT(DISTINCT t.userId) AS active_users_count,
+    -- Thời gian đăng nhập trung bình
+    TO_CHAR(AVG(t.createdAt::time), 'HH24:MI:SS') AS avg_login_time,  
+    -- Thống kê số lần đăng nhập theo mỗi user
+    COUNT(t.id) AS token_issued_count
+FROM Token t
+WHERE DATE(t.createdAt) = CURRENT_DATE
+    AND t.expiresAt > CURRENT_TIMESTAMP
+GROUP BY DATE(t.createdAt)
+ORDER BY login_date DESC;
+
+GRANT SELECT ON daily_active_users TO admin_role, 
+						manager_role, employee_role;
+
+--- View thông kê các món ăn hết hàng do hết nguyên liệu trong kho
+CREATE OR REPLACE VIEW OutOfStockMenuItems AS
+SELECT DISTINCT mi.id AS menuItemId, mi.name AS menuItemName
+FROM MenuItem mi
+JOIN RecipeIngredient ri ON mi.id = ri.menuItemId
+JOIN InventoryItem ii ON ri.inventoryItemId = ii.id
+WHERE ii.quantity <= 0
+  AND mi.isDeleted = false
+  AND ii.isDeleted = false;
+
+GRANT SELECT ON OutOfStockMenuItems TO admin_role, 
+						manager_role, employee_role;
+
+
+--- View liệt kê các function, procedure hiện có  trong database
+CREATE OR REPLACE VIEW view_functions_procedures AS
+SELECT
+    p.proname AS name,
+    CASE
+        WHEN p.prokind = 'f' THEN 'FUNCTION'
+        WHEN p.prokind = 'p' THEN 'PROCEDURE'
+        ELSE 'OTHER'
+    END AS type,
+    n.nspname AS schema,
+    pg_get_function_arguments(p.oid) AS arguments,
+    pg_get_function_result(p.oid) AS return_type
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+
+GRANT SELECT ON view_functions_procedures TO admin_role
+
+--- View liệt kê các Trigger hiện có  trong database
+CREATE OR REPLACE VIEW view_triggers AS
+SELECT
+    event_object_table AS table_name,
+    trigger_name,
+    action_timing AS trigger_timing,
+    event_manipulation AS event,
+    action_statement AS definition
+FROM information_schema.triggers
+WHERE trigger_schema NOT IN ('pg_catalog', 'information_schema')
+
+GRANT SELECT ON view_triggers TO admin_role
+
+--- View liệt kê các user được phân theo role 
+CREATE OR REPLACE VIEW UserRolesView AS
+SELECT 
+    u.id,
+    u.name,
+    CASE
+        WHEN u.isAdmin = TRUE THEN 'admin_role'
+        WHEN u.isEmployee = TRUE AND e.role = 'MANAGER' THEN 'manager_role'
+        WHEN u.isEmployee = TRUE AND e.role != 'MANAGER' THEN 'employee_role'
+        ELSE 'customer_role'
+    END AS userRole
+FROM User1 u
+	LEFT JOIN Employee e ON u.id = e.userId;
+
+GRANT SELECT ON UserRolesView TO admin_role
 
